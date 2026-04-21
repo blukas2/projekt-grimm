@@ -14,11 +14,17 @@ class ChatUI:
         ui.colors(primary="#1a1a2e")
 
         with ui.column().classes("w-full max-w-2xl mx-auto h-screen p-4"):
-            ui.label("Deutsch Lehrer").classes(
-                "text-2xl font-bold text-center w-full mb-2"
-            )
+            self._build_header()
             self._build_message_area()
             self._build_input_area()
+
+    def _build_header(self):
+        """Create the title row and new lesson action."""
+        with ui.row().classes("w-full items-center justify-between mb-2"):
+            ui.label("Deutsch Lehrer").classes("text-2xl font-bold")
+            ui.button("Neue Lektion", on_click=self._start_new_lesson).props(
+                "outline"
+            )
 
     def _build_message_area(self):
         """Create the scrollable message container."""
@@ -36,6 +42,12 @@ class ChatUI:
             ui.button(icon="send", on_click=self._handle_send).props(
                 "round dense"
             )
+
+    def _start_new_lesson(self):
+        """Reset the UI and agent state for a new lesson."""
+        self._agent.reset_lesson()
+        self._input.value = ""
+        self._messages.clear()
 
     async def _handle_send(self):
         """Process a user message and display the agent's response."""

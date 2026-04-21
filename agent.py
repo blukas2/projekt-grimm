@@ -43,12 +43,20 @@ class GermanTeacherAgent:
         self._config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
         )
-        self._chat = self._client.aio.chats.create(
-            model=MODEL,
-            config=self._config,
-        )
+        self._chat = self._create_chat()
 
     async def send_message(self, user_input: str) -> str:
         """Send a message and return the agent's response text."""
         response = await self._chat.send_message(user_input)
         return response.text
+
+    def reset_lesson(self):
+        """Start a fresh chat session without prior lesson context."""
+        self._chat = self._create_chat()
+
+    def _create_chat(self):
+        """Create a new Gemini chat session with the teacher prompt."""
+        return self._client.aio.chats.create(
+            model=MODEL,
+            config=self._config,
+        )
