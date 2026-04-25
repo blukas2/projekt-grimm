@@ -1,14 +1,16 @@
 # Projekt Grimm
 
-Projekt Grimm is a small local chat application for practicing German with a Gemini-powered teacher. It combines a Google GenAI chat session with a simple NiceGUI interface, so you can open the app in your browser and interact with a teacher persona focused on intermediate German learners.
+Projekt Grimm is a small local chat application for practicing German with a Gemini-powered teacher and a Gemma-powered translator. It combines Google GenAI chat and translation components with a NiceGUI interface, so you can open the app in your browser and work with a teacher persona alongside a dedicated translator panel.
 
 ## What It Does
 
 - Responds as a German teacher for B1/B2-level learners.
+- Provides a separate English-German translator panel powered by Gemma 3 27B.
 - Expects the student to write in German in normal conversation.
 - Allows exceptions for translation requests, grammar explanations, and exercise instructions.
 - Grades completed exercises on a `1` to `5` scale.
-- Shows the conversation in a lightweight browser-based chat UI.
+- Enriches single-word translations with German noun and verb metadata.
+- Shows the lesson chat and translator in a lightweight browser-based UI.
 
 ## Tech Stack
 
@@ -61,17 +63,19 @@ app/
 		logging.py          Central application logger with five-minute retention
 	agents/
 		german_teacher.py   Gemini-backed German teacher agent and system prompt
+		translator.py       Gemma-backed translator with lexical result normalization
 	ui/
-		chat.py             NiceGUI chat interface
+		chat.py             NiceGUI lesson chat plus translator panel
 main.py                 Application entrypoint
 ```
 
 ## How It Works
 
-- `main.py` loads environment variables, creates the agent, builds the UI, and starts NiceGUI.
+- `main.py` loads environment variables, creates the teacher and translator components, builds the UI, and starts NiceGUI.
 - `app/core/logging.py` writes application logs to `.logs/application.log` and keeps only the last five minutes of entries.
 - `app/agents/german_teacher.py` configures the Gemini chat session and defines the teacher behavior through a system prompt.
-- `app/ui/chat.py` renders a chat layout, sends user messages to the agent, and displays responses.
+- `app/agents/translator.py` builds Gemma translation prompts, classifies single-word lookups, and normalizes lexical results.
+- `app/ui/chat.py` renders the lesson chat, the translator panel, and their separate interactions.
 
 ## Notes
 
