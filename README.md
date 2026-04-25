@@ -57,6 +57,8 @@ NiceGUI will start a local web server and print the local address in the termina
 
 ```text
 app/
+	core/
+		logging.py          Central application logger with five-minute retention
 	agents/
 		german_teacher.py   Gemini-backed German teacher agent and system prompt
 	ui/
@@ -67,10 +69,12 @@ main.py                 Application entrypoint
 ## How It Works
 
 - `main.py` loads environment variables, creates the agent, builds the UI, and starts NiceGUI.
+- `app/core/logging.py` writes application logs to `.logs/application.log` and keeps only the last five minutes of entries.
 - `app/agents/german_teacher.py` configures the Gemini chat session and defines the teacher behavior through a system prompt.
 - `app/ui/chat.py` renders a chat layout, sends user messages to the agent, and displays responses.
 
 ## Notes
 
 - The app expects `GEMINI_API_KEY` to be present; otherwise startup will fail.
+- The app creates `.logs/application.log` automatically and prunes entries older than five minutes whenever a new log is written.
 - The current interface is intentionally minimal and optimized for local use.

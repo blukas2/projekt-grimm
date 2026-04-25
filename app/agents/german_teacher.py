@@ -1,3 +1,5 @@
+import logging
+
 from google import genai
 from google.genai import types
 
@@ -33,6 +35,7 @@ Behaviour:
 """
 
 MODEL = "gemini-3-flash-preview"
+LOGGER = logging.getLogger("projekt_grimm.agent")
 
 
 class GermanTeacherAgent:
@@ -44,15 +47,19 @@ class GermanTeacherAgent:
             system_instruction=SYSTEM_PROMPT,
         )
         self._chat = self._create_chat()
+        LOGGER.info("German teacher agent initialized")
 
     async def send_message(self, user_input: str) -> str:
         """Send a message and return the agent's response text."""
+        LOGGER.info("Student message submitted")
         response = await self._chat.send_message(user_input)
+        LOGGER.info("Agent response received")
         return response.text
 
     def reset_lesson(self):
         """Start a fresh chat session without prior lesson context."""
         self._chat = self._create_chat()
+        LOGGER.info("Lesson reset")
 
     def _create_chat(self):
         """Create a new Gemini chat session with the teacher prompt."""

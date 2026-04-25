@@ -1,6 +1,11 @@
+import logging
+
 from nicegui import ui
 
 from app.agents import GermanTeacherAgent
+
+
+LOGGER = logging.getLogger("projekt_grimm.ui")
 
 
 class ChatUI:
@@ -17,6 +22,7 @@ class ChatUI:
             self._build_header()
             self._build_message_area()
             self._build_input_area()
+        LOGGER.info("Chat UI built")
 
     def _build_header(self):
         """Create the title row and new lesson action."""
@@ -48,6 +54,7 @@ class ChatUI:
         self._agent.reset_lesson()
         self._input.value = ""
         self._messages.clear()
+        LOGGER.info("New lesson started from UI")
 
     async def _handle_send(self):
         """Process a user message and display the agent's response."""
@@ -57,6 +64,7 @@ class ChatUI:
 
         self._input.value = ""
         self._append_message(text, is_user=True)
+        LOGGER.info("User message rendered")
 
         thinking = self._append_thinking()
         response = await self._agent.send_message(text)
@@ -64,6 +72,7 @@ class ChatUI:
 
         self._append_message(response, is_user=False)
         self._scroll.scroll_to(percent=100)
+        LOGGER.info("Agent message rendered")
 
     def _append_message(self, text: str, *, is_user: bool):
         """Add a chat bubble to the message container."""
