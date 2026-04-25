@@ -1,6 +1,6 @@
 from nicegui import ui
 
-from agent import GermanTeacherAgent
+from app.agents import GermanTeacherAgent
 
 
 class ChatUI:

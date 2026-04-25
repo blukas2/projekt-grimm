@@ -56,16 +56,19 @@ NiceGUI will start a local web server and print the local address in the termina
 ## Project Structure
 
 ```text
-agent.py     Gemini-backed German teacher agent and system prompt
-chat_ui.py   NiceGUI chat interface
-main.py      Application entrypoint
+app/
+	agents/
+		german_teacher.py   Gemini-backed German teacher agent and system prompt
+	ui/
+		chat.py             NiceGUI chat interface
+main.py                 Application entrypoint
 ```
 
 ## How It Works
 
 - `main.py` loads environment variables, creates the agent, builds the UI, and starts NiceGUI.
-- `agent.py` configures the Gemini chat session and defines the teacher behavior through a system prompt.
-- `chat_ui.py` renders a chat layout, sends user messages to the agent, and displays responses.
+- `app/agents/german_teacher.py` configures the Gemini chat session and defines the teacher behavior through a system prompt.
+- `app/ui/chat.py` renders a chat layout, sends user messages to the agent, and displays responses.
 
 ## Notes
 

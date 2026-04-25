@@ -3,8 +3,8 @@ import os
 from dotenv import load_dotenv
 from nicegui import ui
 
-from agent import GermanTeacherAgent
-from chat_ui import ChatUI
+from app.agents import GermanTeacherAgent
+from app.ui import ChatUI
 
 load_dotenv()
 
