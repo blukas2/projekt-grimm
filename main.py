@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from nicegui import ui
 
-from app.agents import GemmaTranslator, GermanTeacherAgent
+from app.agents import GemmaTranslator, GermanTeacherAgent, LiveGermanTeacherAgent
 from app.core import configure_logging
 from app.ui import ChatUI
 
@@ -32,6 +32,8 @@ def read_api_key(logger):
 def build_chat_ui(api_key: str) -> ChatUI:
     """Create the teacher chat UI and the independent translator panel."""
     teacher_agent = GermanTeacherAgent(api_key)
+    live_teacher = LiveGermanTeacherAgent(api_key)
+    live_teacher.register_routes()
     translator = GemmaTranslator(api_key)
     return ChatUI(teacher_agent, translator)
 

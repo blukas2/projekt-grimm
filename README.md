@@ -6,11 +6,13 @@ Projekt Grimm is a small local chat application for practicing German with a Gem
 
 - Responds as a German teacher for B1/B2-level learners.
 - Provides a separate English-German translator panel powered by Gemma 3 27B.
+- Offers a Live Erlebnis tab with Gemini 3.1 Flash Live audio conversations.
 - Expects the student to write in German in normal conversation.
 - Allows exceptions for translation requests, grammar explanations, and exercise instructions.
 - Grades completed exercises on a `1` to `5` scale.
 - Enriches single-word translations with German noun and verb metadata.
 - Shows the lesson chat and translator in a lightweight browser-based UI.
+- Streams microphone audio to Gemini Live and plays spoken responses back in the browser.
 
 ## Tech Stack
 
@@ -65,7 +67,10 @@ app/
 		german_teacher.py   Gemini-backed German teacher agent and system prompt
 		translator.py       Gemma-backed translator with lexical result normalization
 	ui/
-		chat.py             NiceGUI lesson chat plus translator panel
+		chat.py             NiceGUI lesson chat plus live audio tab
+		assets/live_audio.js Browser microphone and playback bridge for Gemini Live
+		
+		
 main.py                 Application entrypoint
 ```
 
@@ -75,7 +80,15 @@ main.py                 Application entrypoint
 - `app/core/logging.py` writes application logs to `.logs/application.log` and keeps only the last five minutes of entries.
 - `app/agents/german_teacher.py` configures the Gemini chat session and defines the teacher behavior through a system prompt.
 - `app/agents/translator.py` builds Gemma translation prompts, classifies single-word lookups, and normalizes lexical results.
-- `app/ui/chat.py` renders the lesson chat, the translator panel, and their separate interactions.
+- `app/ui/chat.py` renders the tabbed lesson interface, including Chat Erlebnis and Live Erlebnis.
+- `app/ui/assets/live_audio.js` captures microphone audio, streams PCM chunks to the backend, and plays Gemini Live audio responses.
+
+## Live Audio Notes
+
+- Live Erlebnis uses the `gemini-3.1-flash-live-preview` model through the server-side Google GenAI SDK.
+- The browser will ask for microphone permission the first time you start a live conversation.
+- Live audio currently targets modern Chromium-based browsers with Web Audio and microphone support.
+- If microphone permission is denied or the Live API connection fails, the chat tab remains usable.
 
 ## Notes
 

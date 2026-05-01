@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 
 from nicegui import ui
 
@@ -7,6 +8,8 @@ from app.agents import GemmaTranslator, GermanTeacherAgent, TranslationError, Tr
 
 
 LOGGER = logging.getLogger("projekt_grimm.ui")
+LIVE_ASSET_DIRECTORY = Path(__file__).with_name("assets")
+LIVE_AUDIO_SCRIPT_FILE = LIVE_ASSET_DIRECTORY / "live_audio.js"
 
 
 class ChatUI:
@@ -16,6 +19,7 @@ class ChatUI:
         self._agent = agent
         self._translator = translator
         self._translator_busy = False
+        self._active_tab = "chat"
 
     def build(self):
         """Construct the chat page layout."""
@@ -23,10 +27,18 @@ class ChatUI:
         with ui.element("div").classes("w-full min-h-screen bg-slate-100"):
             with ui.column().classes("w-full min-h-screen gap-4 p-4"):
                 self._build_header()
+                self._build_main_content()
+        LOGGER.info("Chat UI built")
+
+    def _build_main_content(self):
+        """Render the active lesson content below the shared header."""
+        with ui.tab_panels(self._tabs, value="chat").classes("w-full flex-grow"):
+            with ui.tab_panel("chat").classes("w-full p-0"):
                 with ui.row().classes("w-full flex-grow items-stretch gap-4 flex-col lg:flex-row"):
                     self._build_chat_panel()
                     self._build_translator_panel()
-        LOGGER.info("Chat UI built")
+            with ui.tab_panel("live").classes("w-full p-0"):
+                self._build_live_panel()
 
     def _build_chat_panel(self):
         """Create the lesson chat card."""
@@ -46,11 +58,38 @@ class ChatUI:
     def _build_header(self):
         """Create the title row and new lesson action."""
         with ui.card().classes("w-full shadow-sm"):
-            with ui.row().classes("w-full items-center justify-between gap-3 p-4"):
+            with ui.row().classes("w-full items-center justify-between gap-3 p-4 pb-2"):
                 ui.label("Deutsch Lehrer").classes("text-2xl font-bold")
                 ui.button("Neue Lektion", on_click=self._start_new_lesson).props(
                     "outline"
                 )
+            with ui.tabs(value="chat", on_change=self._handle_tab_change).classes(
+                "w-full px-4 pb-4"
+            ) as self._tabs:
+                ui.tab("chat", label="Chat Erlebnis")
+                ui.tab("live", label="Live Erlebnis")
+
+    def _build_live_panel(self):
+        """Create the live conversation card with session controls."""
+        with ui.card().classes("w-full shadow-sm"):
+            with ui.column().classes("w-full p-6 gap-4"):
+                ui.label("Live Erlebnis").classes("text-2xl font-bold")
+                ui.label(
+                    "Sprich direkt mit dem Lehrer. Das Live-Erlebnis zeigt klar an, wenn die Unterhaltung aktiv ist."
+                ).classes("text-sm text-slate-600")
+                ui.html(self._live_status_markup()).classes("w-full")
+                with ui.row().classes("w-full items-center gap-3"):
+                    ui.button(
+                        "Gespraech starten",
+                        on_click=self._handle_start_live,
+                    ).props("id=start-live-button color=secondary")
+                    ui.button(
+                        "Gespraech beenden",
+                        on_click=self._handle_end_live,
+                    ).props("id=stop-live-button outline color=negative").classes(
+                        "opacity-50 pointer-events-none"
+                    )
+                ui.html(self._live_transcript_markup()).classes("w-full")
 
     def _build_message_area(self):
         """Create the scrollable message container."""
@@ -99,6 +138,50 @@ class ChatUI:
         self._input.value = ""
         self._messages.clear()
         LOGGER.info("New lesson started from UI")
+
+    def _handle_tab_change(self, event):
+        """Keep track of the active Deutsch Lehrer tab."""
+        self._active_tab = event.value
+
+    async def _handle_start_live(self):
+        """Load the browser controller and begin the live conversation."""
+        await ui.run_javascript(self._live_controller_call("startConversation"), timeout=15.0)
+
+    async def _handle_end_live(self):
+        """Stop the current live conversation in the browser."""
+        await ui.run_javascript(self._live_controller_call("stopConversation"), timeout=5.0)
+
+    def _live_controller_call(self, action: str) -> str:
+        """Return JavaScript that ensures the live controller exists and calls it."""
+        script = LIVE_AUDIO_SCRIPT_FILE.read_text(encoding="utf-8")
+        return f"{script}\nwindow.projektGrimmLive.{action}();"
+
+    def _live_status_markup(self) -> str:
+        """Return the browser-controlled live status markup."""
+        return """
+        <div class="flex items-center gap-3 rounded-lg bg-slate-50 p-4">
+            <span id="live-status-badge" class="rounded-full bg-slate-500 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-white">
+                Live aus
+            </span>
+            <p id="live-status-text" class="text-sm font-medium text-slate-700">
+                Noch keine Live-Unterhaltung aktiv.
+            </p>
+        </div>
+        """
+
+    def _live_transcript_markup(self) -> str:
+        """Return the browser-controlled transcript markup."""
+        return """
+        <div class="rounded-lg bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <div class="mb-2 flex items-center justify-between gap-3">
+                <p class="text-sm font-semibold text-slate-700">Live-Protokoll</p>
+                <p class="text-xs text-slate-500">Mikrofonfreigabe im Browser erforderlich</p>
+            </div>
+            <div id="live-transcript" class="flex min-h-32 flex-col gap-2 text-sm text-slate-700">
+                <p class="text-slate-500">Starte ein Live-Gespraech, um Transkripte und Statusmeldungen zu sehen.</p>
+            </div>
+        </div>
+        """
 
     async def _handle_send(self):
         """Process a user message and display the agent's response."""
