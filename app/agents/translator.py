@@ -2,7 +2,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Sequence
 
 from google import genai
 from google.genai import types
@@ -57,11 +57,22 @@ class GermanVerbData:
 class LexicalTranslation:
     """One relevant lexical translation for a single-word lookup."""
 
+    german_root: str
+    english_translation: str
     translated_text: str
     lexical_type: LexicalType
     display_text: str
     noun: GermanNounData | None = None
     verb: GermanVerbData | None = None
+
+
+@dataclass(frozen=True)
+class VocabularyEntry:
+    """Normalized vocabulary row derived from a translation result."""
+
+    german_root: str
+    english_translation: str
+    other_forms: str
 
 
 @dataclass(frozen=True)
@@ -77,6 +88,7 @@ class TranslationResult:
     noun: GermanNounData | None = None
     verb: GermanVerbData | None = None
     lexical_translations: tuple[LexicalTranslation, ...] = ()
+    vocabulary_entries: tuple[VocabularyEntry, ...] = ()
 
     @classmethod
     def plain(
@@ -84,6 +96,7 @@ class TranslationResult:
         direction: TranslationDirection,
         source_text: str,
         translated_text: str,
+        vocabulary_entries: list[VocabularyEntry],
     ) -> "TranslationResult":
         return cls(
             result_type="plain",
@@ -91,6 +104,7 @@ class TranslationResult:
             source_text=source_text,
             translated_text=translated_text,
             display_text=translated_text,
+            vocabulary_entries=tuple(deduplicate_vocabulary_entries(vocabulary_entries)),
         )
 
     @classmethod
@@ -99,6 +113,7 @@ class TranslationResult:
         direction: TranslationDirection,
         source_text: str,
         lexical_translations: list[LexicalTranslation],
+        vocabulary_entries: list[VocabularyEntry],
     ) -> "TranslationResult":
         primary_translation = first_lexical_translation(lexical_translations)
         display_text = join_lexical_display_texts(lexical_translations)
@@ -112,6 +127,7 @@ class TranslationResult:
             noun=primary_translation.noun,
             verb=primary_translation.verb,
             lexical_translations=tuple(lexical_translations),
+            vocabulary_entries=tuple(deduplicate_vocabulary_entries(vocabulary_entries)),
         )
 
 
@@ -137,6 +153,21 @@ class GemmaTranslator:
         prompt = build_translation_prompt(cleaned_text, direction, is_single_word)
         response_text = self._generate_text(prompt)
         return parse_translation_response(cleaned_text, direction, is_single_word, response_text)
+
+    def normalize_vocabulary_entries(
+        self,
+        entries: Sequence[VocabularyEntry],
+        batch_size: int = 25,
+    ) -> list[VocabularyEntry]:
+        """Normalize stored English vocabulary in batched translator requests."""
+        if batch_size < 1:
+            raise TranslationError("Vocabulary normalization batch size must be at least 1.")
+        normalized_entries: list[VocabularyEntry] = []
+        for batch in chunk_vocabulary_entries(entries, batch_size):
+            prompt = build_vocabulary_normalization_prompt(batch)
+            response_text = self._generate_text(prompt)
+            normalized_entries.extend(parse_normalized_vocabulary_response(batch, response_text))
+        return normalized_entries
 
     def _generate_text(self, prompt: str) -> str:
         try:
@@ -169,21 +200,35 @@ def build_translation_prompt(
     is_single_word: bool,
 ) -> str:
     """Build a prompt kept inside the request body for Gemma."""
-    return build_single_word_prompt(source_text, direction) if is_single_word else build_plain_prompt(source_text, direction)
+    if is_single_word:
+        return build_single_word_prompt(source_text, direction)
+    return build_sentence_prompt(source_text, direction)
 
 
-def build_plain_prompt(source_text: str, direction: TranslationDirection) -> str:
-    """Create a plain translation prompt for phrases and sentences."""
+def build_sentence_prompt(source_text: str, direction: TranslationDirection) -> str:
+    """Create a JSON prompt for sentence translation plus vocabulary extraction."""
     source_label, target_label = direction_labels(direction)
     return (
         f"You translate {source_label} text into natural {target_label}.\n\n"
+        "Return compact JSON only. Do not use markdown fences.\n"
+        "Use this schema exactly:\n"
+        '{"translated_text":"...","vocabulary":[{"german_root":"...","english_translation":"...","lexical_type":"noun|verb|other","german_noun":{"lemma":"...","article":"der|die|das","plural":"..."}|null,'
+        '"german_verb":{"infinitive":"...","third_person_singular":"...","simple_past":"...","past_participle":"...","auxiliary":"haben|sein"}|null}]}\n\n'
         "Rules:\n"
-        f"- Return only the {target_label} translation.\n"
+        f"- translated_text must contain only the final {target_label} translation.\n"
         "- Preserve meaning, tone, line breaks, and formatting.\n"
         "- Do not add explanations, notes, or quotation marks unless the source includes them.\n"
         "- If the input contains names, numbers, or code, preserve them exactly when appropriate.\n\n"
-        f"{source_label.title()} text:\n{source_text}\n\n"
-        f"{target_label.title()} translation:"
+        "Vocabulary rules:\n"
+        "- Extract at most 3 important words or short terms from the meaning of the text.\n"
+        "- Always return vocabulary in German root form, regardless of translation direction.\n"
+        "- For nouns, german_root must be article plus singular lemma, and german_noun must be filled.\n"
+        "- For verbs, german_root must be the infinitive, and german_verb must be filled.\n"
+        "- For other lexical items, german_root must be the normalized German base form and both grammar objects must be null.\n"
+        "- english_translation must be the normalized English base form or canonical English term for the German root.\n"
+        "- Prefer meaningful content words over function words, except when a negation like nicht is central to the sentence meaning.\n"
+        "- Avoid duplicates.\n\n"
+        f"{source_label.title()} text:\n{source_text}"
     )
 
 
@@ -194,12 +239,17 @@ def build_single_word_prompt(source_text: str, direction: TranslationDirection) 
         f"You translate one {source_label} word into {target_label}.\n"
         "Return compact JSON only. Do not use markdown fences.\n"
         "Use this schema exactly:\n"
-        '{"translations":[{"translated_text":"...","lexical_type":"noun|verb|other","german_noun":{"lemma":"...","article":"der|die|das","plural":"..."}|null,'
+        '{"translations":[{"german_root":"...","english_translation":"...","translated_text":"...","lexical_type":"noun|verb|other","german_noun":{"lemma":"...","article":"der|die|das","plural":"..."}|null,'
         '"german_verb":{"infinitive":"...","third_person_singular":"...","simple_past":"...","past_participle":"...","auxiliary":"haben|sein"}|null}]}\n\n'
         "Rules:\n"
         f"- Translate the source word from {source_label} into {target_label}.\n"
         "- Return all clearly relevant senses for the same source word when they differ by part of speech or common meaning.\n"
         "- Keep the list short, usually one to three translations, ordered by usefulness.\n"
+        "- german_root must always be the normalized German root form for the German side of the pair.\n"
+        "- english_translation must always be the normalized English base form or canonical English term for the English side of the pair.\n"
+        "- For nouns, german_root must be article plus singular lemma.\n"
+        "- For verbs, german_root must be the infinitive.\n"
+        "- For other items, german_root must be the normalized German dictionary form.\n"
         "- Set lexical_type to noun, verb, or other.\n"
         "- Fill german_noun only when the German side is a noun.\n"
         "- Fill german_verb only when the German side is a verb.\n"
@@ -212,6 +262,34 @@ def build_single_word_prompt(source_text: str, direction: TranslationDirection) 
         'Examples: machen -> {"infinitive":"machen","third_person_singular":"macht","simple_past":"machte","past_participle":"gemacht","auxiliary":"haben"}.\n'
         "- Use null for irrelevant objects.\n\n"
         f"Source word: {source_text}"
+    )
+
+
+def build_vocabulary_normalization_prompt(entries: Sequence[VocabularyEntry]) -> str:
+    """Create a JSON prompt that normalizes stored English vocabulary in batch."""
+    input_payload = {
+        "entries": [
+            {
+                "index": index,
+                "german_root": entry.german_root,
+                "english_translation": entry.english_translation,
+                "other_forms": entry.other_forms,
+            }
+            for index, entry in enumerate(entries)
+        ]
+    }
+    return (
+        "You normalize English vocabulary for a German vocabulary list.\n"
+        "Return compact JSON only. Do not use markdown fences.\n"
+        "Use this schema exactly:\n"
+        '{"entries":[{"index":0,"english_translation":"..."}]}\n\n'
+        "Rules:\n"
+        "- Return the same number of entries and preserve each input index exactly once.\n"
+        "- english_translation must be the normalized English base form or canonical English term for the given German root.\n"
+        "- Use standard English casing for the meaning, such as lowercase for common words and normal capitalization for proper nouns or named calendar terms.\n"
+        "- Keep the gloss short, usually one word or a short term.\n"
+        "- Use other_forms only to preserve the intended sense, not to invent a new meaning.\n\n"
+        f"Input JSON:\n{json.dumps(input_payload, ensure_ascii=True)}"
     )
 
 
@@ -248,9 +326,9 @@ def parse_translation_response(
     response_text: str,
 ) -> TranslationResult:
     """Normalize either plain text or lexical JSON into the app contract."""
-    if not is_single_word:
-        return TranslationResult.plain(direction, source_text, response_text.strip())
     payload = parse_json_payload(response_text)
+    if not is_single_word:
+        return build_sentence_result(source_text, direction, payload)
     return build_lexical_result(source_text, direction, payload)
 
 
@@ -284,7 +362,29 @@ def build_lexical_result(
 ) -> TranslationResult:
     """Construct a structured lexical result from model JSON."""
     lexical_translations = build_lexical_translations(direction, payload)
-    return TranslationResult.lexical(direction, source_text, lexical_translations)
+    vocabulary_entries = build_lexical_vocabulary_entries(lexical_translations)
+    return TranslationResult.lexical(
+        direction,
+        source_text,
+        lexical_translations,
+        vocabulary_entries,
+    )
+
+
+def build_sentence_result(
+    source_text: str,
+    direction: TranslationDirection,
+    payload: dict,
+) -> TranslationResult:
+    """Construct a sentence translation result with extracted vocabulary."""
+    translated_text = required_string(payload, "translated_text")
+    vocabulary_entries = build_sentence_vocabulary_entries(payload.get("vocabulary"))
+    return TranslationResult.plain(
+        direction,
+        source_text,
+        translated_text,
+        vocabulary_entries,
+    )
 
 
 def first_lexical_translation(
@@ -333,12 +433,180 @@ def build_lexical_entry(
     payload: dict,
 ) -> LexicalTranslation:
     """Build one lexical translation entry from model JSON."""
+    german_root = required_string(payload, "german_root")
+    english_translation = required_string(payload, "english_translation")
     translated_text = required_string(payload, "translated_text")
     lexical_type = required_lexical_type(payload)
     noun = build_noun_data(payload.get("german_noun"), lexical_type)
     verb = build_verb_data(payload.get("german_verb"), lexical_type)
     display_text = format_display_text(direction, translated_text, lexical_type, noun, verb)
-    return LexicalTranslation(translated_text, lexical_type, display_text, noun, verb)
+    return LexicalTranslation(
+        german_root,
+        english_translation,
+        translated_text,
+        lexical_type,
+        display_text,
+        noun,
+        verb,
+    )
+
+
+def build_sentence_vocabulary_entries(payload: object) -> list[VocabularyEntry]:
+    """Parse sentence vocabulary entries from the model payload."""
+    if payload is None:
+        return []
+    entries_payload = expect_list(payload, "vocabulary")
+    entries = [build_sentence_vocabulary_entry(item) for item in entries_payload]
+    return deduplicate_vocabulary_entries(entries)[:3]
+
+
+def build_sentence_vocabulary_entry(payload: object) -> VocabularyEntry:
+    """Build one vocabulary entry from sentence extraction JSON."""
+    entry_payload = expect_mapping(payload, "vocabulary")
+    lexical_type = required_lexical_type(entry_payload)
+    noun = build_noun_data(entry_payload.get("german_noun"), lexical_type)
+    verb = build_verb_data(entry_payload.get("german_verb"), lexical_type)
+    german_root = resolve_german_root(entry_payload, lexical_type, noun, verb)
+    english_translation = required_string(entry_payload, "english_translation")
+    other_forms = format_other_forms(lexical_type, noun, verb)
+    return VocabularyEntry(german_root, english_translation, other_forms)
+
+
+def build_lexical_vocabulary_entries(
+    lexical_translations: list[LexicalTranslation],
+) -> list[VocabularyEntry]:
+    """Convert lexical translations into normalized vocabulary entries."""
+    entries = [build_lexical_vocabulary_entry(entry) for entry in lexical_translations]
+    return deduplicate_vocabulary_entries(entries)
+
+
+def build_lexical_vocabulary_entry(
+    lexical_translation: LexicalTranslation,
+) -> VocabularyEntry:
+    """Build a stored vocabulary row from one lexical translation."""
+    other_forms = format_other_forms(
+        lexical_translation.lexical_type,
+        lexical_translation.noun,
+        lexical_translation.verb,
+    )
+    return VocabularyEntry(
+        lexical_translation.german_root,
+        lexical_translation.english_translation,
+        other_forms,
+    )
+
+
+def parse_normalized_vocabulary_response(
+    source_entries: Sequence[VocabularyEntry],
+    response_text: str,
+) -> list[VocabularyEntry]:
+    """Parse one batched normalization response into updated vocabulary entries."""
+    payload = parse_json_payload(response_text)
+    entries_payload = expect_list(payload.get("entries"), "entries")
+    normalized_entries = build_normalized_vocabulary_entries(source_entries, entries_payload)
+    if len(normalized_entries) != len(source_entries):
+        raise MalformedTranslationError("The normalization payload returned the wrong number of entries.")
+    return normalized_entries
+
+
+def build_normalized_vocabulary_entries(
+    source_entries: Sequence[VocabularyEntry],
+    entries_payload: list[object],
+) -> list[VocabularyEntry]:
+    """Build normalized vocabulary entries while preserving input order."""
+    normalized_entries: list[VocabularyEntry | None] = [None] * len(source_entries)
+    for entry_payload in entries_payload:
+        normalized_entry = build_normalized_vocabulary_entry(source_entries, entry_payload)
+        index = required_index(expect_mapping(entry_payload, "entries"), len(source_entries))
+        if normalized_entries[index] is not None:
+            raise MalformedTranslationError("The normalization payload duplicated an entry index.")
+        normalized_entries[index] = normalized_entry
+    if any(entry is None for entry in normalized_entries):
+        raise MalformedTranslationError("The normalization payload is missing an entry index.")
+    return [entry for entry in normalized_entries if entry is not None]
+
+
+def build_normalized_vocabulary_entry(
+    source_entries: Sequence[VocabularyEntry],
+    payload: object,
+) -> VocabularyEntry:
+    """Build one normalized vocabulary entry from model JSON."""
+    entry_payload = expect_mapping(payload, "entries")
+    index = required_index(entry_payload, len(source_entries))
+    source_entry = source_entries[index]
+    return VocabularyEntry(
+        source_entry.german_root,
+        required_string(entry_payload, "english_translation"),
+        source_entry.other_forms,
+    )
+
+
+def chunk_vocabulary_entries(
+    entries: Sequence[VocabularyEntry],
+    batch_size: int,
+) -> list[Sequence[VocabularyEntry]]:
+    """Split vocabulary entries into fixed-size request batches."""
+    return [entries[index:index + batch_size] for index in range(0, len(entries), batch_size)]
+
+
+def resolve_german_root(
+    payload: dict,
+    lexical_type: LexicalType,
+    noun: GermanNounData | None,
+    verb: GermanVerbData | None,
+) -> str:
+    """Choose the normalized German root for storage."""
+    if lexical_type == "noun" and noun:
+        return f"{noun.article} {noun.lemma}"
+    if lexical_type == "verb" and verb:
+        return verb.infinitive
+    return required_string(payload, "german_root")
+
+
+def format_other_forms(
+    lexical_type: LexicalType,
+    noun: GermanNounData | None,
+    verb: GermanVerbData | None,
+) -> str:
+    """Serialize non-root German forms for vocabulary storage."""
+    if lexical_type == "noun" and noun:
+        return f"Plural: die {noun.plural}"
+    if lexical_type == "verb" and verb:
+        return format_verb_forms(verb)
+    return ""
+
+
+def format_verb_forms(verb: GermanVerbData) -> str:
+    """Serialize key German verb forms onto one line."""
+    return (
+        f"3rd person singular: {verb.third_person_singular}; "
+        f"Simple past: {verb.simple_past}; "
+        f"Past participle: {perfect_auxiliary(verb.auxiliary)} {verb.past_participle}"
+    )
+
+
+def deduplicate_vocabulary_entries(entries: list[VocabularyEntry]) -> list[VocabularyEntry]:
+    """Keep the first vocabulary row for each German-English pair."""
+    unique_entries: list[VocabularyEntry] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for entry in entries:
+        key = vocabulary_key(entry)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique_entries.append(entry)
+    return unique_entries
+
+
+def vocabulary_key(entry: VocabularyEntry) -> tuple[str, str]:
+    """Return a normalized uniqueness key for one vocabulary row."""
+    return normalize_for_key(entry.german_root), normalize_for_key(entry.english_translation)
+
+
+def normalize_for_key(value: str) -> str:
+    """Normalize text for stable deduplication."""
+    collapsed = " ".join(value.split())
+    return collapsed.casefold()
 
 
 def required_string(payload: dict, key: str) -> str:
@@ -388,6 +656,21 @@ def expect_mapping(payload: object, key: str) -> dict:
     if isinstance(payload, dict):
         return payload
     raise MalformedTranslationError(f"The translation payload is missing '{key}'.")
+
+
+def expect_list(payload: object, key: str) -> list[object]:
+    """Require a list object for structured lexical metadata."""
+    if isinstance(payload, list):
+        return payload
+    raise MalformedTranslationError(f"The translation payload is missing '{key}'.")
+
+
+def required_index(payload: dict, entry_count: int) -> int:
+    """Read a required entry index from a normalization payload."""
+    value = payload.get("index")
+    if isinstance(value, int) and 0 <= value < entry_count:
+        return value
+    raise MalformedTranslationError("The normalization payload contains an invalid entry index.")
 
 
 def format_display_text(

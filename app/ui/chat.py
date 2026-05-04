@@ -5,6 +5,7 @@ from pathlib import Path
 from nicegui import ui
 
 from app.agents import GemmaTranslator, GermanTeacherAgent, TranslationError, TranslationResult
+from app.core import VocabularyRepository, VocabularyRow
 
 
 LOGGER = logging.getLogger("projekt_grimm.ui")
@@ -15,9 +16,15 @@ LIVE_AUDIO_SCRIPT_FILE = LIVE_ASSET_DIRECTORY / "live_audio.js"
 class ChatUI:
     """NiceGUI chat interface wired to a GermanTeacherAgent."""
 
-    def __init__(self, agent: GermanTeacherAgent, translator: GemmaTranslator):
+    def __init__(
+        self,
+        agent: GermanTeacherAgent,
+        translator: GemmaTranslator,
+        vocabulary_repository: VocabularyRepository,
+    ):
         self._agent = agent
         self._translator = translator
+        self._vocabulary_repository = vocabulary_repository
         self._translator_busy = False
         self._active_tab = "chat"
 
@@ -39,6 +46,8 @@ class ChatUI:
                     self._build_translator_panel()
             with ui.tab_panel("live").classes("w-full p-0"):
                 self._build_live_panel()
+            with ui.tab_panel("vocabulary").classes("w-full p-0"):
+                self._build_vocabulary_panel()
 
     def _build_chat_panel(self):
         """Create the lesson chat card."""
@@ -68,6 +77,7 @@ class ChatUI:
             ) as self._tabs:
                 ui.tab("chat", label="Chat Erlebnis")
                 ui.tab("live", label="Live Erlebnis")
+                ui.tab("vocabulary", label="Wortschatz")
 
     def _build_live_panel(self):
         """Create the live conversation card with session controls."""
@@ -90,6 +100,30 @@ class ChatUI:
                         "opacity-50 pointer-events-none"
                     )
                 ui.html(self._live_transcript_markup()).classes("w-full")
+
+    def _build_vocabulary_panel(self):
+        """Create the stored vocabulary view."""
+        with ui.card().classes("w-full shadow-sm"):
+            with ui.column().classes("w-full p-6 gap-4"):
+                self._build_vocabulary_header()
+                self._build_vocabulary_table()
+
+    def _build_vocabulary_header(self):
+        """Create the vocabulary title row and refresh action."""
+        with ui.row().classes("w-full items-start justify-between gap-3"):
+            with ui.column().classes("gap-1"):
+                ui.label("Wortschatz").classes("text-2xl font-bold")
+                ui.label(
+                    "Automatisch gespeicherte Woerter und Begriffe aus dem Uebersetzer."
+                ).classes("text-sm text-slate-600")
+            ui.button("Aktualisieren", on_click=self._refresh_vocabulary_table).props(
+                "outline"
+            )
+
+    def _build_vocabulary_table(self):
+        """Create the refreshable vocabulary table container."""
+        self._vocabulary_table = ui.column().classes("w-full gap-0 rounded-lg border border-slate-200 bg-white")
+        self._refresh_vocabulary_table()
 
     def _build_message_area(self):
         """Create the scrollable message container."""
@@ -226,8 +260,54 @@ class ChatUI:
             LOGGER.exception("Translator request failed in UI")
             self._show_translation_error(str(exc))
             return
+        await asyncio.to_thread(
+            self._vocabulary_repository.add_missing_entries,
+            result.vocabulary_entries,
+        )
+        self._refresh_vocabulary_table()
         self._show_translation_result(result)
         LOGGER.info("Translator result rendered")
+
+    def _refresh_vocabulary_table(self):
+        """Reload the stored vocabulary rows into the table only."""
+        rows = self._vocabulary_repository.load_rows()
+        self._vocabulary_table.clear()
+        with self._vocabulary_table:
+            self._render_vocabulary_table_header()
+            if rows:
+                self._render_vocabulary_rows(rows)
+            else:
+                self._render_empty_vocabulary_row()
+
+    def _render_vocabulary_table_header(self):
+        """Render the German column headers for the vocabulary table."""
+        with ui.grid().classes(
+            "w-full grid-cols-1 gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 md:grid-cols-4"
+        ):
+            ui.label("Deutsches Wort")
+            ui.label("Englisch")
+            ui.label("Weitere Formen")
+            ui.label("Staerke")
+
+    def _render_vocabulary_rows(self, rows: list[VocabularyRow]):
+        """Render all stored vocabulary rows."""
+        for row in rows:
+            self._render_vocabulary_row(row)
+
+    def _render_vocabulary_row(self, row: VocabularyRow):
+        """Render one vocabulary row."""
+        with ui.grid().classes(
+            "w-full grid-cols-1 gap-3 border-b border-slate-100 px-4 py-3 text-sm text-slate-700 last:border-b-0 md:grid-cols-4"
+        ):
+            ui.label(row.german_root).classes("whitespace-pre-wrap font-medium")
+            ui.label(row.english_translation).classes("whitespace-pre-wrap")
+            ui.label(row.other_forms or "-").classes("whitespace-pre-wrap text-slate-600")
+            ui.label(str(row.strength)).classes("whitespace-pre-wrap")
+
+    def _render_empty_vocabulary_row(self):
+        """Render the empty state inside the vocabulary table."""
+        with ui.row().classes("w-full px-4 py-6"):
+            ui.label("Noch keine Eintraege im Wortschatz.").classes("text-sm text-slate-500")
 
     def _append_message(self, text: str, *, is_user: bool):
         """Add a chat bubble to the message container."""
