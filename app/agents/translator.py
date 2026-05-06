@@ -8,7 +8,7 @@ from google import genai
 from google.genai import types
 
 
-DEFAULT_TRANSLATOR_MODEL = "gemma-3-27b-it"
+DEFAULT_TRANSLATOR_MODEL = "gemma-4-26b-a4b-it"
 LOGGER = logging.getLogger("projekt_grimm.translator")
 SINGLE_WORD_PATTERN = re.compile(r"^[A-Za-zÄÖÜäöüß'-]+$")
 
@@ -132,7 +132,7 @@ class TranslationResult:
 
 
 class GemmaTranslator:
-    """Translate between English and German with Gemma 3 27B."""
+    """Translate between English and German with Gemma 4 26B."""
 
     def __init__(self, api_key: str, model: str = DEFAULT_TRANSLATOR_MODEL):
         if not api_key:

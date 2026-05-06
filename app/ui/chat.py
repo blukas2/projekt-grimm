@@ -11,6 +11,13 @@ from app.core import VocabularyRepository, VocabularyRow
 LOGGER = logging.getLogger("projekt_grimm.ui")
 LIVE_ASSET_DIRECTORY = Path(__file__).with_name("assets")
 LIVE_AUDIO_SCRIPT_FILE = LIVE_ASSET_DIRECTORY / "live_audio.js"
+VOCABULARY_SORT_COLUMNS = (
+    ("german_root", "Deutsches Wort"),
+    ("english_translation", "Englisch"),
+    ("other_forms", "Weitere Formen"),
+    ("strength", "Staerke"),
+)
+GERMAN_SORT_PREFIXES = {"der", "die", "das"}
 
 
 class ChatUI:
@@ -27,21 +34,23 @@ class ChatUI:
         self._vocabulary_repository = vocabulary_repository
         self._translator_busy = False
         self._active_tab = "chat"
+        self._vocabulary_sort_column = "german_root"
+        self._vocabulary_sort_descending = False
 
     def build(self):
         """Construct the chat page layout."""
         ui.colors(primary="#1a1a2e", secondary="#0f766e")
-        with ui.element("div").classes("w-full min-h-screen bg-slate-100"):
-            with ui.column().classes("w-full min-h-screen gap-4 p-4"):
+        with ui.element("div").classes("w-full h-screen bg-slate-100 overflow-hidden"):
+            with ui.column().classes("w-full h-full gap-4 p-4 min-h-0"):
                 self._build_header()
                 self._build_main_content()
         LOGGER.info("Chat UI built")
 
     def _build_main_content(self):
         """Render the active lesson content below the shared header."""
-        with ui.tab_panels(self._tabs, value="chat").classes("w-full flex-grow"):
-            with ui.tab_panel("chat").classes("w-full p-0"):
-                with ui.row().classes("w-full flex-grow items-stretch gap-4 flex-col lg:flex-row"):
+        with ui.tab_panels(self._tabs, value="chat").classes("w-full flex-grow min-h-0"):
+            with ui.tab_panel("chat").classes("w-full h-full p-0"):
+                with ui.row().classes("w-full h-full min-h-0 items-stretch gap-4 flex-col lg:flex-row"):
                     self._build_chat_panel()
                     self._build_translator_panel()
             with ui.tab_panel("live").classes("w-full p-0"):
@@ -51,14 +60,14 @@ class ChatUI:
 
     def _build_chat_panel(self):
         """Create the lesson chat card."""
-        with ui.card().classes("w-full lg:flex-[2] shadow-sm"):
+        with ui.card().classes("w-full h-full min-h-0 lg:flex-[2] shadow-sm"):
             with ui.column().classes("w-full h-full p-4 gap-0"):
                 self._build_message_area()
                 self._build_input_area()
 
     def _build_translator_panel(self):
         """Create the independent translator card."""
-        with ui.card().classes("w-full lg:flex-1 shadow-sm"):
+        with ui.card().classes("w-full h-full min-h-0 lg:flex-1 shadow-sm"):
             with ui.column().classes("w-full h-full p-4 gap-4"):
                 self._build_translator_header()
                 self._build_translator_controls()
@@ -270,7 +279,7 @@ class ChatUI:
 
     def _refresh_vocabulary_table(self):
         """Reload the stored vocabulary rows into the table only."""
-        rows = self._vocabulary_repository.load_rows()
+        rows = self._sorted_vocabulary_rows(self._vocabulary_repository.load_rows())
         self._vocabulary_table.clear()
         with self._vocabulary_table:
             self._render_vocabulary_table_header()
@@ -284,10 +293,69 @@ class ChatUI:
         with ui.grid().classes(
             "w-full grid-cols-1 gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 md:grid-cols-4"
         ):
-            ui.label("Deutsches Wort")
-            ui.label("Englisch")
-            ui.label("Weitere Formen")
-            ui.label("Staerke")
+            for column_name, label in VOCABULARY_SORT_COLUMNS:
+                self._render_vocabulary_sort_button(column_name, label)
+
+    def _render_vocabulary_sort_button(self, column_name: str, label: str):
+        """Render one sortable vocabulary header control."""
+        ui.button(
+            self._vocabulary_header_label(column_name, label),
+            on_click=lambda sort_column=column_name: self._handle_vocabulary_sort(sort_column),
+        ).props("flat no-caps dense align=left").classes(
+            self._vocabulary_header_classes(column_name)
+        )
+
+    def _vocabulary_header_label(self, column_name: str, label: str) -> str:
+        """Return the current header label including sort direction."""
+        if column_name != self._vocabulary_sort_column:
+            return label
+        direction = "v" if self._vocabulary_sort_descending else "^"
+        return f"{label} {direction}"
+
+    def _vocabulary_header_classes(self, column_name: str) -> str:
+        """Return the classes for one vocabulary header button."""
+        base_classes = "w-full justify-start rounded-md px-2 py-1 text-left text-sm font-semibold"
+        if column_name == self._vocabulary_sort_column:
+            return f"{base_classes} bg-white text-secondary shadow-sm"
+        return f"{base_classes} text-slate-700"
+
+    def _handle_vocabulary_sort(self, column_name: str):
+        """Toggle the current table sort and refresh the display."""
+        if column_name == self._vocabulary_sort_column:
+            self._vocabulary_sort_descending = not self._vocabulary_sort_descending
+        else:
+            self._vocabulary_sort_column = column_name
+            self._vocabulary_sort_descending = False
+        self._refresh_vocabulary_table()
+
+    def _sorted_vocabulary_rows(self, rows: list[VocabularyRow]) -> list[VocabularyRow]:
+        """Return vocabulary rows sorted for the current UI state."""
+        return sorted(
+            rows,
+            key=self._vocabulary_sort_key,
+            reverse=self._vocabulary_sort_descending,
+        )
+
+    def _vocabulary_sort_key(self, row: VocabularyRow):
+        """Return the active sort key for one vocabulary row."""
+        if self._vocabulary_sort_column == "strength":
+            return row.strength
+        value = getattr(row, self._vocabulary_sort_column)
+        if self._vocabulary_sort_column == "german_root":
+            return self._normalize_german_sort_value(value)
+        return self._normalize_text_sort_value(value)
+
+    def _normalize_text_sort_value(self, value: str) -> str:
+        """Normalize plain text values for case-insensitive sorting."""
+        return " ".join(value.split()).casefold()
+
+    def _normalize_german_sort_value(self, value: str) -> str:
+        """Normalize German nouns while ignoring a leading article."""
+        normalized = " ".join(value.split())
+        parts = normalized.split(" ", 1)
+        if len(parts) == 2 and parts[0].casefold() in GERMAN_SORT_PREFIXES:
+            return parts[1].casefold()
+        return normalized.casefold()
 
     def _render_vocabulary_rows(self, rows: list[VocabularyRow]):
         """Render all stored vocabulary rows."""
