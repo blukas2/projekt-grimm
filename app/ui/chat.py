@@ -33,7 +33,21 @@ class ChatUI:
         self._translator = translator
         self._vocabulary_repository = vocabulary_repository
         self._translator_busy = False
-        self._active_tab = "chat"
+        self._active_tab = "arbeitsbuch"
+        self._chat_history: list[tuple[str, bool]] = []
+        self._chat_draft = ""
+        self._assistant_is_thinking = False
+        self._chat_message_columns = []
+        self._chat_scroll_areas = []
+        self._chat_inputs = []
+        self._translator_direction_value = "en_to_de"
+        self._translator_source_text = ""
+        self._translator_output_state = "placeholder"
+        self._translator_error_message = ""
+        self._translator_result: TranslationResult | None = None
+        self._translator_direction_toggles = []
+        self._translator_input_fields = []
+        self._translator_output_columns = []
         self._vocabulary_sort_column = "german_root"
         self._vocabulary_sort_descending = False
 
@@ -48,7 +62,9 @@ class ChatUI:
 
     def _build_main_content(self):
         """Render the active lesson content below the shared header."""
-        with ui.tab_panels(self._tabs, value="chat").classes("w-full flex-grow min-h-0"):
+        with ui.tab_panels(self._tabs, value="arbeitsbuch").classes("w-full flex-grow min-h-0"):
+            with ui.tab_panel("arbeitsbuch").classes("w-full h-full p-0"):
+                self._build_arbeitsbuch_panel()
             with ui.tab_panel("chat").classes("w-full h-full p-0"):
                 with ui.row().classes("w-full h-full min-h-0 items-stretch gap-4 flex-col lg:flex-row"):
                     self._build_chat_panel()
@@ -58,16 +74,43 @@ class ChatUI:
             with ui.tab_panel("vocabulary").classes("w-full p-0"):
                 self._build_vocabulary_panel()
 
-    def _build_chat_panel(self):
-        """Create the lesson chat card."""
+    def _build_arbeitsbuch_panel(self):
+        """Create the workbook layout with a large task area and right sidebar."""
+        with ui.row().classes("w-full h-full min-h-0 items-stretch gap-4 flex-col lg:flex-row"):
+            self._build_workbook_panel()
+            with ui.column().classes("w-full h-full min-h-0 gap-4 lg:flex-1"):
+                self._build_chat_panel(card_classes="w-full min-h-0 flex-[3] shadow-sm")
+                self._build_translator_panel(
+                    card_classes="w-full min-h-0 flex-[2] shadow-sm"
+                )
+
+    def _build_workbook_panel(self):
+        """Create the workbook placeholder area."""
         with ui.card().classes("w-full h-full min-h-0 lg:flex-[2] shadow-sm"):
+            with ui.column().classes("w-full h-full justify-center p-6 gap-4"):
+                ui.label("Willkommen im Arbeitsbuch").classes("text-3xl font-bold")
+                ui.label(
+                    "Hier erscheinen spaeter Aufgaben, die vom Agenten fuer dich erstellt werden."
+                ).classes("text-base text-slate-700")
+                with ui.card().classes("w-full max-w-2xl bg-slate-50 shadow-none ring-1 ring-slate-200"):
+                    with ui.column().classes("w-full p-5 gap-2"):
+                        ui.label("Noch keine Aufgaben vorhanden").classes(
+                            "text-lg font-semibold text-slate-800"
+                        )
+                        ui.label(
+                            "Nutze den Chat auf der rechten Seite, um erste Aufgaben generieren zu lassen."
+                        ).classes("text-sm text-slate-600")
+
+    def _build_chat_panel(self, card_classes: str = "w-full h-full min-h-0 lg:flex-[2] shadow-sm"):
+        """Create the lesson chat card."""
+        with ui.card().classes(card_classes):
             with ui.column().classes("w-full h-full p-4 gap-0"):
                 self._build_message_area()
                 self._build_input_area()
 
-    def _build_translator_panel(self):
+    def _build_translator_panel(self, card_classes: str = "w-full h-full min-h-0 lg:flex-1 shadow-sm"):
         """Create the independent translator card."""
-        with ui.card().classes("w-full h-full min-h-0 lg:flex-1 shadow-sm"):
+        with ui.card().classes(card_classes):
             with ui.column().classes("w-full h-full p-4 gap-4"):
                 self._build_translator_header()
                 self._build_translator_controls()
@@ -81,9 +124,10 @@ class ChatUI:
                 ui.button("Neue Lektion", on_click=self._start_new_lesson).props(
                     "outline"
                 )
-            with ui.tabs(value="chat", on_change=self._handle_tab_change).classes(
+            with ui.tabs(value="arbeitsbuch", on_change=self._handle_tab_change).classes(
                 "w-full px-4 pb-4"
             ) as self._tabs:
+                ui.tab("arbeitsbuch", label="Arbeitsbuch")
                 ui.tab("chat", label="Chat Erlebnis")
                 ui.tab("live", label="Live Erlebnis")
                 ui.tab("vocabulary", label="Wortschatz")
@@ -136,18 +180,34 @@ class ChatUI:
 
     def _build_message_area(self):
         """Create the scrollable message container."""
-        self._scroll = ui.scroll_area().classes("flex-grow w-full min-h-0")
-        with self._scroll:
-            self._messages = ui.column().classes("w-full p-2 gap-2")
+        scroll_area = ui.scroll_area().classes("flex-grow w-full min-h-0")
+        self._chat_scroll_areas.append(scroll_area)
+        with scroll_area:
+            messages = ui.column().classes("w-full p-2 gap-2")
+        self._chat_message_columns.append(messages)
+        self._render_chat_messages(messages)
 
     def _build_input_area(self):
         """Create the text input and send button row."""
         with ui.row().classes("w-full items-center gap-2 mt-2"):
-            self._input = ui.input(
-                placeholder="Nachricht schreiben..."
-            ).classes("flex-grow").on("keydown.enter", self._handle_send)
+            chat_input = ui.input(
+                placeholder="Nachricht schreiben...",
+                value=self._chat_draft,
+            ).classes("flex-grow")
+            chat_input.on(
+                "keydown.enter",
+                lambda _: self._send_from_chat_input(chat_input),
+            )
+            chat_input.on(
+                "update:model-value",
+                lambda _: self._sync_chat_draft(chat_input.value or ""),
+            )
+            self._chat_inputs.append(chat_input)
 
-            ui.button(icon="send", on_click=self._handle_send).props(
+            ui.button(
+                icon="send",
+                on_click=lambda: self._send_from_chat_input(chat_input),
+            ).props(
                 "round dense"
             )
 
@@ -160,26 +220,46 @@ class ChatUI:
 
     def _build_translator_controls(self):
         """Create the translator direction, input, and action controls."""
-        self._translator_direction = ui.toggle(
+        direction_toggle = ui.toggle(
             {"en_to_de": "English -> Deutsch", "de_to_en": "Deutsch -> English"},
-            value="en_to_de",
+            value=self._translator_direction_value,
         ).props("unelevated toggle-color=secondary")
-        self._translator_input = ui.textarea(
-            placeholder="Wort, Phrase oder Satz eingeben..."
+        direction_toggle.on(
+            "update:model-value",
+            lambda _: self._sync_translator_direction(direction_toggle.value),
+        )
+        self._translator_direction_toggles.append(direction_toggle)
+        translator_input = ui.textarea(
+            placeholder="Wort, Phrase oder Satz eingeben...",
+            value=self._translator_source_text,
         ).props("outlined autogrow").classes("w-full")
-        ui.button("Uebersetzen", on_click=self._handle_translate).props("color=secondary")
+        translator_input.on(
+            "update:model-value",
+            lambda _: self._sync_translator_source_text(translator_input.value or ""),
+        )
+        self._translator_input_fields.append(translator_input)
+        ui.button(
+            "Uebersetzen",
+            on_click=lambda: self._translate_from_controls(
+                translator_input,
+                direction_toggle,
+            ),
+        ).props("color=secondary")
 
     def _build_translator_output(self):
         """Create the translator result area."""
         with ui.column().classes("w-full gap-2 rounded-lg bg-slate-50 p-3 min-h-48"):
-            self._translator_output = ui.column().classes("w-full gap-2")
-        self._show_translation_placeholder()
+            translator_output = ui.column().classes("w-full gap-2")
+        self._translator_output_columns.append(translator_output)
+        self._render_translator_output(translator_output)
 
     def _start_new_lesson(self):
         """Reset the UI and agent state for a new lesson."""
         self._agent.reset_lesson()
-        self._input.value = ""
-        self._messages.clear()
+        self._chat_history.clear()
+        self._assistant_is_thinking = False
+        self._sync_chat_draft("")
+        self._refresh_chat_views()
         LOGGER.info("New lesson started from UI")
 
     def _handle_tab_change(self, event):
@@ -228,27 +308,35 @@ class ChatUI:
 
     async def _handle_send(self):
         """Process a user message and display the agent's response."""
-        text = self._input.value.strip()
+        text = self._chat_draft.strip()
         if not text:
             return
 
-        self._input.value = ""
+        self._sync_chat_draft("")
         self._append_message(text, is_user=True)
         LOGGER.info("User message rendered")
 
-        thinking = self._append_thinking()
+        self._assistant_is_thinking = True
+        self._refresh_chat_views()
         response = await self._agent.send_message(text)
-        self._messages.remove(thinking)
-
+        self._assistant_is_thinking = False
         self._append_message(response, is_user=False)
-        self._scroll.scroll_to(percent=100)
         LOGGER.info("Agent message rendered")
+
+    async def _handle_send_from_input(self, chat_input):
+        """Submit a message using the currently active chat input."""
+        self._sync_chat_draft(chat_input.value or "")
+        await self._handle_send()
+
+    def _send_from_chat_input(self, chat_input):
+        """Schedule a send request from one chat input field."""
+        asyncio.create_task(self._handle_send_from_input(chat_input))
 
     async def _handle_translate(self):
         """Run a translation request without affecting lesson state."""
         if self._translator_busy:
             return
-        source_text = self._translator_input.value.strip()
+        source_text = self._translator_source_text.strip()
         if not source_text:
             self._show_translation_error("Bitte zuerst Text fuer die Uebersetzung eingeben.")
             return
@@ -257,13 +345,25 @@ class ChatUI:
         await self._run_translation(source_text)
         self._translator_busy = False
 
+    async def _handle_translate_from_controls(self, translator_input, direction_toggle):
+        """Run translation using the active workbook or chat translator controls."""
+        self._sync_translator_source_text(translator_input.value or "")
+        self._sync_translator_direction(direction_toggle.value)
+        await self._handle_translate()
+
+    def _translate_from_controls(self, translator_input, direction_toggle):
+        """Schedule translation from one translator control set."""
+        asyncio.create_task(
+            self._handle_translate_from_controls(translator_input, direction_toggle)
+        )
+
     async def _run_translation(self, source_text: str):
         """Execute the translation request and update the result panel."""
         try:
             result = await asyncio.to_thread(
                 self._translator.translate,
                 source_text,
-                self._translator_direction.value,
+                self._translator_direction_value,
             )
         except TranslationError as exc:
             LOGGER.exception("Translator request failed in UI")
@@ -379,50 +479,112 @@ class ChatUI:
 
     def _append_message(self, text: str, *, is_user: bool):
         """Add a chat bubble to the message container."""
-        with self._messages:
-            ui.chat_message(
-                text=text,
-                name="Du" if is_user else "Lehrer",
-                sent=is_user,
-            )
+        self._chat_history.append((text, is_user))
+        self._refresh_chat_views()
 
-    def _append_thinking(self):
-        """Add a temporary 'thinking' indicator and return it."""
-        with self._messages:
-            return ui.chat_message(
-                text="...",
-                name="Lehrer",
-                sent=False,
-            )
+    def _sync_chat_draft(self, value: str):
+        """Keep all chat inputs aligned to the same draft text."""
+        self._chat_draft = value
+        for chat_input in self._chat_inputs:
+            if chat_input.value != value:
+                chat_input.value = value
+
+    def _refresh_chat_views(self):
+        """Redraw all chat message columns and keep them scrolled to the bottom."""
+        for messages in self._chat_message_columns:
+            self._render_chat_messages(messages)
+        for scroll_area in self._chat_scroll_areas:
+            scroll_area.scroll_to(percent=100)
+
+    def _render_chat_messages(self, messages):
+        """Render the full conversation history inside one chat column."""
+        messages.clear()
+        with messages:
+            for text, is_user in self._chat_history:
+                ui.chat_message(
+                    text=text,
+                    name="Du" if is_user else "Lehrer",
+                    sent=is_user,
+                )
+            if self._assistant_is_thinking:
+                ui.chat_message(text="...", name="Lehrer", sent=False)
+
+    def _sync_translator_direction(self, value: str):
+        """Keep all translator direction toggles aligned."""
+        self._translator_direction_value = value
+        for direction_toggle in self._translator_direction_toggles:
+            if direction_toggle.value != value:
+                direction_toggle.value = value
+
+    def _sync_translator_source_text(self, value: str):
+        """Keep all translator textareas aligned."""
+        self._translator_source_text = value
+        for translator_input in self._translator_input_fields:
+            if translator_input.value != value:
+                translator_input.value = value
 
     def _show_translation_placeholder(self):
         """Render the initial empty translator state."""
-        self._translator_output.clear()
-        with self._translator_output:
-            ui.label("Noch keine Uebersetzung.").classes("text-base text-slate-500")
+        self._translator_output_state = "placeholder"
+        self._translator_error_message = ""
+        self._translator_result = None
+        self._refresh_translator_outputs()
 
     def _show_translation_loading(self):
         """Render the loading state for the translator."""
-        self._translator_output.clear()
-        with self._translator_output:
-            ui.label("Gemma uebersetzt...").classes("text-base text-slate-600")
+        self._translator_output_state = "loading"
+        self._translator_error_message = ""
+        self._translator_result = None
+        self._refresh_translator_outputs()
 
     def _show_translation_error(self, message: str):
         """Render a translator error without touching the lesson chat."""
-        self._translator_output.clear()
-        with self._translator_output:
-            ui.label("Uebersetzung fehlgeschlagen").classes("text-base font-medium text-red-700")
-            ui.label(message).classes("whitespace-pre-wrap text-sm text-red-600")
+        self._translator_output_state = "error"
+        self._translator_error_message = message
+        self._translator_result = None
+        self._refresh_translator_outputs()
 
     def _show_translation_result(self, result: TranslationResult):
         """Render a structured translator result."""
-        self._translator_output.clear()
-        with self._translator_output:
-            ui.label(self._direction_label(result)).classes("text-xs uppercase tracking-wide text-slate-500")
-            ui.label(f"Quelle: {result.source_text}").classes("text-sm text-slate-600")
-            self._render_result_body(result)
-            if result.result_type == "lexical":
-                ui.label(self._lexical_label(result)).classes("text-xs font-medium text-secondary")
+        self._translator_output_state = "result"
+        self._translator_error_message = ""
+        self._translator_result = result
+        self._refresh_translator_outputs()
+
+    def _refresh_translator_outputs(self):
+        """Redraw all translator output panes from the shared state."""
+        for translator_output in self._translator_output_columns:
+            self._render_translator_output(translator_output)
+
+    def _render_translator_output(self, translator_output):
+        """Render the translator output state inside one output pane."""
+        translator_output.clear()
+        with translator_output:
+            if self._translator_output_state == "loading":
+                ui.label("Gemma uebersetzt...").classes("text-base text-slate-600")
+                return
+            if self._translator_output_state == "error":
+                ui.label("Uebersetzung fehlgeschlagen").classes(
+                    "text-base font-medium text-red-700"
+                )
+                ui.label(self._translator_error_message).classes(
+                    "whitespace-pre-wrap text-sm text-red-600"
+                )
+                return
+            if self._translator_output_state != "result" or self._translator_result is None:
+                ui.label("Noch keine Uebersetzung.").classes("text-base text-slate-500")
+                return
+            ui.label(self._direction_label(self._translator_result)).classes(
+                "text-xs uppercase tracking-wide text-slate-500"
+            )
+            ui.label(f"Quelle: {self._translator_result.source_text}").classes(
+                "text-sm text-slate-600"
+            )
+            self._render_result_body(self._translator_result)
+            if self._translator_result.result_type == "lexical":
+                ui.label(self._lexical_label(self._translator_result)).classes(
+                    "text-xs font-medium text-secondary"
+                )
 
     def _render_result_body(self, result: TranslationResult):
         """Render either a plain translation or multiple lexical entries."""
