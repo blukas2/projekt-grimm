@@ -5,7 +5,16 @@ from pathlib import Path
 from nicegui import ui
 
 from app.agents import GemmaTranslator, GermanTeacherAgent, TranslationError, TranslationResult
-from app.core import VocabularyRepository, VocabularyRow
+from app.core import (
+    VocabularyRepository,
+    VocabularyRow,
+    WorkbookAnswer,
+    WorkbookAssistanceMode,
+    WorkbookEventKind,
+    WorkbookSegmentKind,
+    WorkbookTask,
+    WorkbookValidationResult,
+)
 
 
 LOGGER = logging.getLogger("projekt_grimm.ui")
@@ -37,9 +46,19 @@ class ChatUI:
         self._chat_history: list[tuple[str, bool]] = []
         self._chat_draft = ""
         self._assistant_is_thinking = False
+        self._workbook_busy = False
+        self._workbook_task: WorkbookTask | None = None
+        self._workbook_validation: WorkbookValidationResult | None = None
+        self._workbook_error_message = ""
+        self._workbook_request_text = ""
+        self._workbook_assistance_mode_value = WorkbookAssistanceMode.AUTO.value
+        self._workbook_answers: dict[str, str] = {}
         self._chat_message_columns = []
         self._chat_scroll_areas = []
         self._chat_inputs = []
+        self._workbook_request_inputs = []
+        self._workbook_assistance_selects = []
+        self._workbook_output_columns = []
         self._translator_direction_value = "en_to_de"
         self._translator_source_text = ""
         self._translator_output_state = "placeholder"
@@ -85,21 +104,55 @@ class ChatUI:
                 )
 
     def _build_workbook_panel(self):
-        """Create the workbook placeholder area."""
+        """Create the workbook area with generation controls and task state."""
         with ui.card().classes("w-full h-full min-h-0 lg:flex-[2] shadow-sm"):
-            with ui.column().classes("w-full h-full justify-center p-6 gap-4"):
-                ui.label("Willkommen im Arbeitsbuch").classes("text-3xl font-bold")
-                ui.label(
-                    "Hier erscheinen spaeter Aufgaben, die vom Agenten fuer dich erstellt werden."
-                ).classes("text-base text-slate-700")
-                with ui.card().classes("w-full max-w-2xl bg-slate-50 shadow-none ring-1 ring-slate-200"):
-                    with ui.column().classes("w-full p-5 gap-2"):
-                        ui.label("Noch keine Aufgaben vorhanden").classes(
-                            "text-lg font-semibold text-slate-800"
-                        )
-                        ui.label(
-                            "Nutze den Chat auf der rechten Seite, um erste Aufgaben generieren zu lassen."
-                        ).classes("text-sm text-slate-600")
+            with ui.column().classes("w-full h-full min-h-0 p-6 gap-4 overflow-auto"):
+                self._build_workbook_header()
+                self._build_workbook_controls()
+                workbook_output = ui.column().classes("w-full gap-4")
+        self._workbook_output_columns.append(workbook_output)
+        self._render_workbook_output(workbook_output)
+
+    def _build_workbook_header(self):
+        """Create the workbook title and helper copy."""
+        ui.label("Arbeitsbuch").classes("text-3xl font-bold")
+        ui.label(
+            "Hier erscheinen Aufgaben, die der Lehrer fuer dich erstellt oder bewertet."
+        ).classes("text-base text-slate-700")
+
+    def _build_workbook_controls(self):
+        """Create the dedicated workbook generation controls."""
+        with ui.card().classes("w-full bg-slate-50 shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-4"):
+                ui.label("Neue Aufgabe").classes("text-lg font-semibold text-slate-800")
+                request_input = ui.input(
+                    placeholder="z. B. Artikel, Praeteritum oder trennbare Verben",
+                    value=self._workbook_request_text,
+                ).classes("w-full")
+                request_input.on(
+                    "update:model-value",
+                    lambda _: self._sync_workbook_request_text(request_input.value or ""),
+                )
+                self._workbook_request_inputs.append(request_input)
+                assistance_select = ui.select(
+                    {
+                        WorkbookAssistanceMode.AUTO.value: "Automatisch",
+                        WorkbookAssistanceMode.BRACKET_HINT.value: "Form in Klammern",
+                        WorkbookAssistanceMode.WORD_BANK.value: "Wortliste",
+                        WorkbookAssistanceMode.OPEN.value: "Ohne Hilfe",
+                    },
+                    value=self._workbook_assistance_mode_value,
+                    label="Hilfsmodus",
+                ).classes("w-full")
+                assistance_select.on(
+                    "update:model-value",
+                    lambda _: self._sync_workbook_assistance_mode(assistance_select.value),
+                )
+                self._workbook_assistance_selects.append(assistance_select)
+                ui.button(
+                    "Aufgabe erstellen",
+                    on_click=self._generate_workbook_from_controls,
+                ).props("color=secondary")
 
     def _build_chat_panel(self, card_classes: str = "w-full h-full min-h-0 lg:flex-[2] shadow-sm"):
         """Create the lesson chat card."""
@@ -258,6 +311,7 @@ class ChatUI:
         self._agent.reset_lesson()
         self._chat_history.clear()
         self._assistant_is_thinking = False
+        self._show_workbook_placeholder()
         self._sync_chat_draft("")
         self._refresh_chat_views()
         LOGGER.info("New lesson started from UI")
@@ -320,8 +374,10 @@ class ChatUI:
         self._refresh_chat_views()
         response = await self._agent.send_message(text)
         self._assistant_is_thinking = False
-        self._append_message(response, is_user=False)
-        LOGGER.info("Agent message rendered")
+        self._apply_workbook_events(response.workbook_events)
+        if response.text.strip():
+            self._append_message(response.text, is_user=False)
+            LOGGER.info("Agent message rendered")
 
     async def _handle_send_from_input(self, chat_input):
         """Submit a message using the currently active chat input."""
@@ -356,6 +412,57 @@ class ChatUI:
         asyncio.create_task(
             self._handle_translate_from_controls(translator_input, direction_toggle)
         )
+
+    async def _handle_generate_workbook_task(self):
+        """Create one workbook task from the dedicated controls."""
+        if self._workbook_busy:
+            return
+        request_text = self._workbook_request_text.strip()
+        if not request_text:
+            self._show_workbook_error("Bitte zuerst ein Thema oder eine Uebungsidee eingeben.")
+            return
+        self._show_workbook_loading()
+        try:
+            response = await self._agent.generate_workbook_task(
+                request_text,
+                self._workbook_assistance_mode_value,
+            )
+        except Exception:
+            LOGGER.exception("Workbook generation failed in UI")
+            self._show_workbook_error("Die Aufgabe konnte gerade nicht erstellt werden.")
+            return
+        self._workbook_busy = False
+        self._apply_workbook_events(response.workbook_events)
+        if response.text.strip():
+            self._append_message(response.text, is_user=False)
+
+    def _generate_workbook_from_controls(self):
+        """Schedule workbook generation from the dedicated controls."""
+        asyncio.create_task(self._handle_generate_workbook_task())
+
+    async def _handle_submit_workbook_task(self):
+        """Validate the active workbook task and mirror the explanation to chat."""
+        if self._workbook_busy or self._workbook_task is None:
+            return
+        answers = self._build_workbook_answers()
+        if self._has_empty_workbook_answers(answers):
+            self._show_workbook_error("Bitte alle Luecken ausfuellen, bevor du abgibst.")
+            return
+        self._show_workbook_loading()
+        try:
+            response = await self._agent.validate_workbook_task(self._workbook_task, answers)
+        except Exception:
+            LOGGER.exception("Workbook validation failed in UI")
+            self._show_workbook_error("Die Aufgabe konnte gerade nicht bewertet werden.")
+            return
+        self._workbook_busy = False
+        self._apply_workbook_events(response.workbook_events)
+        if response.text.strip():
+            self._append_message(response.text, is_user=False)
+
+    def _submit_workbook_task(self):
+        """Schedule workbook validation from the Arbeitsbuch controls."""
+        asyncio.create_task(self._handle_submit_workbook_task())
 
     async def _run_translation(self, source_text: str):
         """Execute the translation request and update the result panel."""
@@ -495,6 +602,266 @@ class ChatUI:
             self._render_chat_messages(messages)
         for scroll_area in self._chat_scroll_areas:
             scroll_area.scroll_to(percent=100)
+
+    def _sync_workbook_request_text(self, value: str):
+        """Keep all workbook request inputs aligned."""
+        self._workbook_request_text = value
+        for request_input in self._workbook_request_inputs:
+            if request_input.value != value:
+                request_input.value = value
+
+    def _sync_workbook_assistance_mode(self, value: str):
+        """Keep all workbook assistance selectors aligned."""
+        self._workbook_assistance_mode_value = value
+        for assistance_select in self._workbook_assistance_selects:
+            if assistance_select.value != value:
+                assistance_select.value = value
+
+    def _build_workbook_answers(self) -> list[WorkbookAnswer]:
+        """Return the current answers in task order."""
+        if self._workbook_task is None:
+            return []
+        return [
+            WorkbookAnswer(blank.blank_id, self._workbook_answers.get(blank.blank_id, ""))
+            for blank in self._workbook_task.blanks
+        ]
+
+    def _has_empty_workbook_answers(self, answers: list[WorkbookAnswer]) -> bool:
+        """Return whether any workbook blank is still empty."""
+        return any(not answer.answer_text.strip() for answer in answers)
+
+    def _apply_workbook_events(self, events):
+        """Apply workbook events emitted by the teacher agent."""
+        for event in events:
+            if event.kind == WorkbookEventKind.TASK_GENERATED and event.task is not None:
+                self._show_workbook_task(event.task)
+            if event.kind == WorkbookEventKind.TASK_VALIDATED and event.validation is not None:
+                self._show_workbook_validation(event.validation)
+
+    def _show_workbook_placeholder(self):
+        """Reset the workbook area to its initial empty state."""
+        self._workbook_busy = False
+        self._workbook_task = None
+        self._workbook_validation = None
+        self._workbook_error_message = ""
+        self._workbook_answers = {}
+        self._sync_workbook_request_text("")
+        self._refresh_workbook_views()
+
+    def _show_workbook_loading(self):
+        """Render the workbook loading state without clearing the active task."""
+        self._workbook_busy = True
+        self._workbook_error_message = ""
+        self._refresh_workbook_views()
+
+    def _show_workbook_error(self, message: str):
+        """Render a workbook-local error state."""
+        self._workbook_busy = False
+        self._workbook_error_message = message
+        self._refresh_workbook_views()
+
+    def _show_workbook_task(self, task: WorkbookTask):
+        """Load one newly generated workbook task."""
+        self._workbook_busy = False
+        self._workbook_task = task
+        self._workbook_validation = None
+        self._workbook_error_message = ""
+        self._workbook_answers = {blank.blank_id: "" for blank in task.blanks}
+        self._switch_to_workbook_tab()
+        self._refresh_workbook_views()
+
+    def _show_workbook_validation(self, validation: WorkbookValidationResult):
+        """Render the validation state for the current workbook task."""
+        self._workbook_busy = False
+        self._workbook_validation = validation
+        self._workbook_error_message = ""
+        self._switch_to_workbook_tab()
+        self._refresh_workbook_views()
+
+    def _switch_to_workbook_tab(self):
+        """Focus the Arbeitsbuch tab after a workbook event."""
+        self._active_tab = "arbeitsbuch"
+        self._tabs.value = "arbeitsbuch"
+
+    def _refresh_workbook_views(self):
+        """Redraw all workbook output panes from shared state."""
+        for workbook_output in self._workbook_output_columns:
+            self._render_workbook_output(workbook_output)
+
+    def _render_workbook_output(self, workbook_output):
+        """Render the workbook state inside one output pane."""
+        workbook_output.clear()
+        with workbook_output:
+            if self._workbook_error_message:
+                self._render_workbook_error()
+            if self._workbook_busy:
+                ui.label("Arbeitsbuch wird aktualisiert...").classes("text-sm text-slate-500")
+            if self._workbook_task is None:
+                self._render_workbook_placeholder()
+                return
+            self._render_workbook_task(self._workbook_task)
+            if self._workbook_validation is not None:
+                self._render_workbook_results(self._workbook_task, self._workbook_validation)
+
+    def _render_workbook_placeholder(self):
+        """Render the empty workbook state."""
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-2 p-5"):
+                ui.label("Noch keine Aufgabe vorhanden").classes(
+                    "text-lg font-semibold text-slate-800"
+                )
+                ui.label(
+                    "Nutze den Chat oder die Schaltflaeche oben, um eine Aufgabe zu erstellen."
+                ).classes("text-sm text-slate-600")
+
+    def _render_workbook_error(self):
+        """Render the workbook error banner."""
+        with ui.card().classes("w-full bg-red-50 shadow-none ring-1 ring-red-200"):
+            with ui.column().classes("w-full gap-1 p-4"):
+                ui.label("Arbeitsbuch-Fehler").classes("text-base font-semibold text-red-700")
+                ui.label(self._workbook_error_message).classes("text-sm text-red-600")
+
+    def _render_workbook_task(self, task: WorkbookTask):
+        """Render the active workbook task and its inline inputs."""
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-4 p-5"):
+                ui.label(task.title).classes("text-2xl font-bold text-slate-900")
+                ui.label(task.instructions).classes("whitespace-pre-wrap text-sm text-slate-700")
+                self._render_workbook_word_bank(task)
+                self._render_workbook_paragraphs(task)
+                ui.button("Loesung abgeben", on_click=self._submit_workbook_task).props(
+                    "color=secondary"
+                )
+
+    def _render_workbook_word_bank(self, task: WorkbookTask):
+        """Render the optional workbook word bank."""
+        if task.assistance_mode != WorkbookAssistanceMode.WORD_BANK or not task.word_bank:
+            return
+        with ui.row().classes("w-full flex-wrap gap-2 rounded-lg bg-slate-50 p-3"):
+            ui.label("Wortliste:").classes("text-sm font-medium text-slate-700")
+            for word in task.word_bank:
+                ui.badge(word).props("outline color=secondary")
+
+    def _render_workbook_paragraphs(self, task: WorkbookTask):
+        """Render all workbook paragraphs with inline answer fields."""
+        for paragraph in task.paragraphs:
+            self._render_workbook_paragraph(task, paragraph)
+
+    def _render_workbook_paragraph(self, task: WorkbookTask, paragraph):
+        """Render one paragraph of the active workbook task."""
+        with ui.row().classes(
+            "w-full flex-wrap items-end gap-2 rounded-lg bg-slate-50 p-4 ring-1 ring-slate-200"
+        ):
+            for segment in paragraph.segments:
+                if segment.kind == WorkbookSegmentKind.TEXT:
+                    ui.label(segment.text).classes("whitespace-pre-wrap text-base text-slate-800")
+                    continue
+                self._render_workbook_input_segment(task, segment.blank_id)
+
+    def _render_workbook_input_segment(self, task: WorkbookTask, blank_id: str):
+        """Render one editable blank inside the workbook text."""
+        blank = task.blank_for(blank_id)
+        answer_value = self._workbook_answers.get(blank_id, "")
+        input_field = ui.input(value=answer_value, placeholder="...").classes("w-28")
+        input_field.props("outlined dense")
+        input_field.on(
+            "update:model-value",
+            lambda event, current_blank=blank_id: self._sync_workbook_answer(
+                current_blank,
+                event.args or "",
+            ),
+        )
+        if blank is not None and blank.bracket_hint:
+            ui.label(f"({blank.bracket_hint})").classes("text-sm text-slate-500")
+
+    def _sync_workbook_answer(self, blank_id: str, value: str):
+        """Store the current answer for one workbook blank."""
+        self._workbook_answers[blank_id] = value
+
+    def _render_workbook_results(
+        self,
+        task: WorkbookTask,
+        validation: WorkbookValidationResult,
+    ):
+        """Render the validated workbook result below the active task."""
+        with ui.card().classes("w-full bg-emerald-50 shadow-none ring-1 ring-emerald-200"):
+            with ui.column().classes("w-full gap-2 p-5"):
+                ui.label(f"Bewertung: Note {validation.grade}").classes(
+                    "text-lg font-semibold text-emerald-800"
+                )
+                ui.label(validation.summary).classes("whitespace-pre-wrap text-sm text-emerald-700")
+        self._render_workbook_user_solution(task, validation)
+        self._render_workbook_corrected_solution(task, validation)
+
+    def _render_workbook_user_solution(
+        self,
+        task: WorkbookTask,
+        validation: WorkbookValidationResult,
+    ):
+        """Render the submitted workbook solution with inline marking."""
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-5"):
+                ui.label("Deine Loesung").classes("text-lg font-semibold text-slate-900")
+                self._render_workbook_solution_text(task, validation, corrected=False)
+
+    def _render_workbook_corrected_solution(
+        self,
+        task: WorkbookTask,
+        validation: WorkbookValidationResult,
+    ):
+        """Render the corrected workbook solution."""
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-5"):
+                ui.label("Korrigierte Version").classes("text-lg font-semibold text-slate-900")
+                self._render_workbook_solution_text(task, validation, corrected=True)
+
+    def _render_workbook_solution_text(
+        self,
+        task: WorkbookTask,
+        validation: WorkbookValidationResult,
+        *,
+        corrected: bool,
+    ):
+        """Render one workbook solution view using either answers or corrections."""
+        for paragraph in task.paragraphs:
+            with ui.row().classes(
+                "w-full flex-wrap items-end gap-2 rounded-lg bg-slate-50 p-4 ring-1 ring-slate-200"
+            ):
+                for segment in paragraph.segments:
+                    if segment.kind == WorkbookSegmentKind.TEXT:
+                        ui.label(segment.text).classes("whitespace-pre-wrap text-base text-slate-800")
+                        continue
+                    self._render_workbook_solution_segment(validation, segment.blank_id, corrected)
+
+    def _render_workbook_solution_segment(
+        self,
+        validation: WorkbookValidationResult,
+        blank_id: str,
+        corrected: bool,
+    ):
+        """Render one workbook blank inside a validated solution view."""
+        result = validation.result_for(blank_id)
+        if result is None:
+            with ui.element("span").classes(
+                "inline-flex items-center rounded-md bg-slate-400 px-3 py-1 text-sm font-semibold text-white"
+            ):
+                ui.label("-").classes("text-inherit")
+            return
+        label = result.correction if corrected else (result.submitted_answer or "-")
+        with ui.element("span").classes(self._result_badge_classes(result, corrected)):
+            ui.label(label).classes("text-inherit")
+        if corrected or not result.explanation:
+            return
+        ui.label(result.explanation).classes("text-xs text-slate-500")
+
+    def _result_badge_classes(self, result, corrected: bool) -> str:
+        """Return the visual style for one validated blank."""
+        base_classes = "inline-flex items-center rounded-md px-3 py-1 text-sm font-semibold text-white"
+        if corrected:
+            return f"{base_classes} bg-slate-600"
+        if result.is_correct:
+            return f"{base_classes} bg-emerald-600"
+        return f"{base_classes} bg-red-600"
 
     def _render_chat_messages(self, messages):
         """Render the full conversation history inside one chat column."""
