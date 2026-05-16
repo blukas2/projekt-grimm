@@ -65,6 +65,11 @@ class VocabularyRepository:
             for row in rows:
                 writer.writerow(self._serialize_row(row))
 
+    def update_strengths(self, strengths_by_key: dict[tuple[str, str], int]):
+        """Apply clamped strength updates for the matching stored rows."""
+        rows = [self._updated_row(row, strengths_by_key) for row in self.load_rows()]
+        self.replace_rows(rows)
+
     def _ensure_file_exists(self):
         self._directory.mkdir(parents=True, exist_ok=True)
         if self._file_path.exists() and self._file_path.stat().st_size > 0:
@@ -126,7 +131,25 @@ class VocabularyRepository:
             strength = int(value)
         except ValueError:
             return 1
-        return min(5, max(1, strength))
+        return self._clamp_strength(strength)
+
+    def _updated_row(
+        self,
+        row: VocabularyRow,
+        strengths_by_key: dict[tuple[str, str], int],
+    ) -> VocabularyRow:
+        key = self._build_key(row.german_root, row.english_translation)
+        if key not in strengths_by_key:
+            return row
+        return VocabularyRow(
+            german_root=row.german_root,
+            english_translation=row.english_translation,
+            other_forms=row.other_forms,
+            strength=self._clamp_strength(strengths_by_key[key]),
+        )
+
+    def _clamp_strength(self, value: int) -> int:
+        return min(5, max(1, value))
 
     def _build_key(self, german_root: str, english_translation: str) -> tuple[str, str]:
         return self._normalize_key(german_root), self._normalize_key(english_translation)

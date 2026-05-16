@@ -11,8 +11,10 @@ from app.core import (
     WorkbookAnswer,
     WorkbookAssistanceMode,
     WorkbookEventKind,
+    WorkbookPracticeType,
     WorkbookSegmentKind,
     WorkbookTask,
+    WorkbookTaskFamily,
     WorkbookValidationResult,
 )
 
@@ -51,12 +53,14 @@ class ChatUI:
         self._workbook_validation: WorkbookValidationResult | None = None
         self._workbook_error_message = ""
         self._workbook_request_text = ""
+        self._workbook_task_family_value = WorkbookTaskFamily.FILL_IN_BLANK.value
         self._workbook_assistance_mode_value = WorkbookAssistanceMode.AUTO.value
         self._workbook_answers: dict[str, str] = {}
         self._chat_message_columns = []
         self._chat_scroll_areas = []
         self._chat_inputs = []
         self._workbook_request_inputs = []
+        self._workbook_task_family_selects = []
         self._workbook_assistance_selects = []
         self._workbook_output_columns = []
         self._translator_direction_value = "en_to_de"
@@ -125,8 +129,23 @@ class ChatUI:
         with ui.card().classes("w-full bg-slate-50 shadow-none ring-1 ring-slate-200"):
             with ui.column().classes("w-full gap-3 p-4"):
                 ui.label("Neue Aufgabe").classes("text-lg font-semibold text-slate-800")
+                family_select = ui.select(
+                    {
+                        WorkbookTaskFamily.FILL_IN_BLANK.value: "Lueckentext",
+                        WorkbookTaskFamily.GUIDED_WRITING.value: "Schreibaufgabe",
+                        WorkbookTaskFamily.READING_COMPREHENSION.value: "Leseverstehen",
+                        WorkbookTaskFamily.VOCABULARY_PRACTICE.value: "Wortschatztraining",
+                    },
+                    value=self._workbook_task_family_value,
+                    label="Aufgabentyp",
+                ).classes("w-full")
+                family_select.on(
+                    "update:model-value",
+                    lambda _: self._sync_workbook_task_family(family_select.value),
+                )
+                self._workbook_task_family_selects.append(family_select)
                 request_input = ui.input(
-                    placeholder="z. B. Artikel, Praeteritum oder trennbare Verben",
+                    placeholder="z. B. Artikel, Praeteritum oder Alltagstext mit Fragen",
                     value=self._workbook_request_text,
                 ).classes("w-full")
                 request_input.on(
@@ -149,6 +168,7 @@ class ChatUI:
                     lambda _: self._sync_workbook_assistance_mode(assistance_select.value),
                 )
                 self._workbook_assistance_selects.append(assistance_select)
+                self._refresh_workbook_assistance_controls()
                 ui.button(
                     "Aufgabe erstellen",
                     on_click=self._generate_workbook_from_controls,
@@ -426,6 +446,7 @@ class ChatUI:
             response = await self._agent.generate_workbook_task(
                 request_text,
                 self._workbook_assistance_mode_value,
+                self._workbook_task_family_value,
             )
         except Exception:
             LOGGER.exception("Workbook generation failed in UI")
@@ -446,7 +467,7 @@ class ChatUI:
             return
         answers = self._build_workbook_answers()
         if self._has_empty_workbook_answers(answers):
-            self._show_workbook_error("Bitte alle Luecken ausfuellen, bevor du abgibst.")
+            self._show_workbook_error("Bitte alle Antworten ausfuellen, bevor du abgibst.")
             return
         self._show_workbook_loading()
         try:
@@ -610,6 +631,14 @@ class ChatUI:
             if request_input.value != value:
                 request_input.value = value
 
+    def _sync_workbook_task_family(self, value: str):
+        """Keep all workbook task-family selectors aligned."""
+        self._workbook_task_family_value = value
+        for family_select in self._workbook_task_family_selects:
+            if family_select.value != value:
+                family_select.value = value
+        self._refresh_workbook_assistance_controls()
+
     def _sync_workbook_assistance_mode(self, value: str):
         """Keep all workbook assistance selectors aligned."""
         self._workbook_assistance_mode_value = value
@@ -617,13 +646,26 @@ class ChatUI:
             if assistance_select.value != value:
                 assistance_select.value = value
 
+    def _refresh_workbook_assistance_controls(self):
+        """Disable assistance controls when the selected task does not use them."""
+        enabled = self._selected_task_uses_assistance()
+        for assistance_select in self._workbook_assistance_selects:
+            if enabled:
+                assistance_select.enable()
+                continue
+            assistance_select.disable()
+
+    def _selected_task_uses_assistance(self) -> bool:
+        """Return whether the active control selection supports assistance mode."""
+        return self._workbook_task_family_value == WorkbookTaskFamily.FILL_IN_BLANK.value
+
     def _build_workbook_answers(self) -> list[WorkbookAnswer]:
         """Return the current answers in task order."""
         if self._workbook_task is None:
             return []
         return [
-            WorkbookAnswer(blank.blank_id, self._workbook_answers.get(blank.blank_id, ""))
-            for blank in self._workbook_task.blanks
+            WorkbookAnswer(answer_id, self._workbook_answers.get(answer_id, ""))
+            for answer_id in self._workbook_task.answer_ids()
         ]
 
     def _has_empty_workbook_answers(self, answers: list[WorkbookAnswer]) -> bool:
@@ -666,7 +708,7 @@ class ChatUI:
         self._workbook_task = task
         self._workbook_validation = None
         self._workbook_error_message = ""
-        self._workbook_answers = {blank.blank_id: "" for blank in task.blanks}
+        self._workbook_answers = {answer_id: "" for answer_id in task.answer_ids()}
         self._switch_to_workbook_tab()
         self._refresh_workbook_views()
 
@@ -727,10 +769,116 @@ class ChatUI:
             with ui.column().classes("w-full gap-4 p-5"):
                 ui.label(task.title).classes("text-2xl font-bold text-slate-900")
                 ui.label(task.instructions).classes("whitespace-pre-wrap text-sm text-slate-700")
-                self._render_workbook_word_bank(task)
-                self._render_workbook_paragraphs(task)
+                self._render_workbook_task_body(task)
                 ui.button("Loesung abgeben", on_click=self._submit_workbook_task).props(
                     "color=secondary"
+                )
+
+    def _render_workbook_task_body(self, task: WorkbookTask):
+        """Render the family-specific workbook content."""
+        if task.family == WorkbookTaskFamily.GUIDED_WRITING:
+            self._render_writing_task(task)
+            return
+        if task.family == WorkbookTaskFamily.READING_COMPREHENSION:
+            self._render_reading_task(task)
+            return
+        if task.family == WorkbookTaskFamily.VOCABULARY_PRACTICE:
+            self._render_vocabulary_practice_task(task)
+            return
+        self._render_workbook_word_bank(task)
+        self._render_workbook_paragraphs(task)
+
+    def _render_vocabulary_practice_task(self, task: WorkbookTask):
+        """Render the active vocabulary-practice task."""
+        for item in task.vocabulary_items:
+            self._render_vocabulary_practice_item(item)
+
+    def _render_vocabulary_practice_item(self, item):
+        """Render one vocabulary-practice prompt and its input control."""
+        answer_value = self._workbook_answers.get(item.item_id, "")
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-4"):
+                ui.label(self._practice_type_label(item.practice_type)).classes(
+                    "text-xs font-semibold uppercase tracking-wide text-slate-500"
+                )
+                ui.label(item.prompt).classes("whitespace-pre-wrap text-base font-medium text-slate-900")
+                ui.label(f"Aktuelle Staerke: {item.strength_before}").classes(
+                    "text-sm text-slate-500"
+                )
+                self._render_vocabulary_practice_input(item, answer_value)
+
+    def _render_vocabulary_practice_input(self, item, answer_value: str):
+        """Render the correct input widget for one vocabulary item."""
+        if item.choice_options:
+            choice_input = ui.select(
+                list(item.choice_options),
+                value=answer_value or None,
+                label="Antwort",
+            ).classes("w-full")
+            choice_input.on(
+                "update:model-value",
+                lambda _: self._sync_workbook_answer(item.item_id, choice_input.value or ""),
+            )
+            return
+        input_field = ui.input(value=answer_value, placeholder="Antwort eingeben...").classes(
+            "w-full"
+        )
+        input_field.props("outlined")
+        input_field.on(
+            "update:model-value",
+            lambda event: self._sync_workbook_answer(item.item_id, event.args or ""),
+        )
+
+    def _practice_type_label(self, practice_type: WorkbookPracticeType) -> str:
+        """Return the German UI label for one vocabulary-practice subtype."""
+        labels = {
+            WorkbookPracticeType.PAIR_TRANSLATION: "Zuordnung Uebersetzung",
+            WorkbookPracticeType.PAIR_ARTICLE: "Zuordnung Artikel",
+            WorkbookPracticeType.ALTERNATIVE_FORMS: "Alternative Formen",
+            WorkbookPracticeType.GERMAN_TO_ENGLISH: "Deutsch nach Englisch",
+            WorkbookPracticeType.ENGLISH_TO_GERMAN: "Englisch nach Deutsch",
+        }
+        return labels[practice_type]
+
+    def _render_writing_task(self, task: WorkbookTask):
+        """Render the prompt, guidance, and answer box for guided writing."""
+        self._render_writing_prompt(task)
+        self._render_writing_guidance(task)
+        self._render_writing_answer_input(task)
+
+    def _render_writing_prompt(self, task: WorkbookTask):
+        """Render the main writing prompt."""
+        with ui.card().classes("w-full bg-slate-50 shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-2 p-4"):
+                ui.label("Schreibimpuls").classes("text-base font-semibold text-slate-900")
+                ui.label(task.writing_prompt).classes("whitespace-pre-wrap text-base text-slate-800")
+
+    def _render_writing_guidance(self, task: WorkbookTask):
+        """Render optional guidance points for the writing task."""
+        if not task.guidance_points:
+            return
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-2 p-4"):
+                ui.label("Leitpunkte").classes("text-base font-semibold text-slate-900")
+                for point in task.guidance_points:
+                    ui.label(f"- {point}").classes("whitespace-pre-wrap text-sm text-slate-700")
+
+    def _render_writing_answer_input(self, task: WorkbookTask):
+        """Render the textarea for the learner's writing response."""
+        answer_id = task.answer_ids()[0]
+        answer_value = self._workbook_answers.get(answer_id, "")
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-4"):
+                ui.label("Dein Text").classes("text-base font-semibold text-slate-900")
+                answer_area = ui.textarea(value=answer_value, placeholder="Schreibe hier deinen Text...")
+                answer_area.classes("w-full")
+                answer_area.props("outlined autogrow")
+                answer_area.on(
+                    "update:model-value",
+                    lambda event, current_answer=answer_id: self._sync_workbook_answer(
+                        current_answer,
+                        event.args or "",
+                    ),
                 )
 
     def _render_workbook_word_bank(self, task: WorkbookTask):
@@ -774,6 +922,40 @@ class ChatUI:
         if blank is not None and blank.bracket_hint:
             ui.label(f"({blank.bracket_hint})").classes("text-sm text-slate-500")
 
+    def _render_reading_task(self, task: WorkbookTask):
+        """Render the reading text and per-question answer fields."""
+        self._render_reading_text(task)
+        self._render_reading_questions(task)
+
+    def _render_reading_text(self, task: WorkbookTask):
+        """Render the reading passage for a comprehension task."""
+        with ui.card().classes("w-full bg-slate-50 shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-2 p-4"):
+                ui.label("Lesetext").classes("text-base font-semibold text-slate-900")
+                ui.label(task.reading_text).classes("whitespace-pre-wrap text-base text-slate-800")
+
+    def _render_reading_questions(self, task: WorkbookTask):
+        """Render all reading-comprehension questions."""
+        for question in task.questions:
+            self._render_reading_question(question.question_id, question.prompt)
+
+    def _render_reading_question(self, question_id: str, prompt: str):
+        """Render one reading-comprehension question with a textarea."""
+        answer_value = self._workbook_answers.get(question_id, "")
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-4"):
+                ui.label(prompt).classes("whitespace-pre-wrap text-base font-medium text-slate-900")
+                answer_area = ui.textarea(value=answer_value, placeholder="Deine Antwort...")
+                answer_area.classes("w-full")
+                answer_area.props("outlined autogrow")
+                answer_area.on(
+                    "update:model-value",
+                    lambda event, current_question=question_id: self._sync_workbook_answer(
+                        current_question,
+                        event.args or "",
+                    ),
+                )
+
     def _sync_workbook_answer(self, blank_id: str, value: str):
         """Store the current answer for one workbook blank."""
         self._workbook_answers[blank_id] = value
@@ -784,14 +966,111 @@ class ChatUI:
         validation: WorkbookValidationResult,
     ):
         """Render the validated workbook result below the active task."""
+        self._render_workbook_summary(validation)
+        if task.family == WorkbookTaskFamily.GUIDED_WRITING:
+            self._render_writing_user_answer(validation)
+            self._render_writing_corrected_answer(validation)
+            return
+        if task.family == WorkbookTaskFamily.READING_COMPREHENSION:
+            self._render_reading_user_answers(task, validation)
+            self._render_reading_corrected_answers(task, validation)
+            return
+        if task.family == WorkbookTaskFamily.VOCABULARY_PRACTICE:
+            self._render_vocabulary_results(task, validation)
+            return
+        self._render_workbook_user_solution(task, validation)
+        self._render_workbook_corrected_solution(task, validation)
+
+    def _render_vocabulary_results(
+        self,
+        task: WorkbookTask,
+        validation: WorkbookValidationResult,
+    ):
+        """Render validated vocabulary-practice answers and strength changes."""
+        self._render_vocabulary_result_card("Deine Antworten", task, validation, corrected=False)
+        self._render_vocabulary_result_card("Korrekte Loesungen", task, validation, corrected=True)
+
+    def _render_vocabulary_result_card(
+        self,
+        title: str,
+        task: WorkbookTask,
+        validation: WorkbookValidationResult,
+        corrected: bool,
+    ):
+        """Render one vocabulary-practice result card."""
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-5"):
+                ui.label(title).classes("text-lg font-semibold text-slate-900")
+                for item in task.vocabulary_items:
+                    self._render_vocabulary_result_item(item, validation, corrected)
+
+    def _render_vocabulary_result_item(self, item, validation, corrected: bool):
+        """Render one vocabulary-practice answer with its strength change."""
+        result = validation.vocabulary_result_for(item.item_id)
+        with ui.card().classes("w-full bg-slate-50 shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-2 p-4"):
+                ui.label(item.prompt).classes("whitespace-pre-wrap text-sm font-semibold text-slate-900")
+                self._render_vocabulary_result_answer(result, corrected)
+                if result is None:
+                    return
+                ui.label(self._strength_change_text(result)).classes(
+                    "text-xs font-medium text-slate-500"
+                )
+
+    def _render_vocabulary_result_answer(self, result, corrected: bool):
+        """Render one vocabulary-practice answer badge and explanation."""
+        if result is None:
+            self._render_missing_result_badge()
+            return
+        label = result.correction if corrected else (result.submitted_answer or "-")
+        with ui.element("span").classes(self._result_badge_classes(result, corrected)):
+            ui.label(label).classes("text-inherit whitespace-pre-wrap")
+        if corrected or not result.explanation:
+            return
+        ui.label(result.explanation).classes("whitespace-pre-wrap text-xs text-slate-500")
+
+    def _strength_change_text(self, result) -> str:
+        """Return the strength change summary for one validated vocabulary item."""
+        return f"Staerke: {result.strength_before} -> {result.strength_after}"
+
+    def _render_writing_user_answer(self, validation: WorkbookValidationResult):
+        """Render the submitted guided-writing answer."""
+        result = validation.writing_response()
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-5"):
+                ui.label("Dein Text").classes("text-lg font-semibold text-slate-900")
+                ui.label(self._writing_text(result, corrected=False)).classes(
+                    "whitespace-pre-wrap text-base text-slate-800"
+                )
+
+    def _render_writing_corrected_answer(self, validation: WorkbookValidationResult):
+        """Render the corrected guided-writing answer and explanation."""
+        result = validation.writing_response()
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-5"):
+                ui.label("Korrigierte Version").classes("text-lg font-semibold text-slate-900")
+                ui.label(self._writing_text(result, corrected=True)).classes(
+                    "whitespace-pre-wrap text-base text-slate-800"
+                )
+                if result is not None and result.explanation:
+                    ui.label(result.explanation).classes("whitespace-pre-wrap text-sm text-slate-600")
+
+    def _writing_text(self, result, *, corrected: bool) -> str:
+        """Return either the submitted or corrected writing text."""
+        if result is None:
+            return "-"
+        if corrected:
+            return result.corrected_answer or "-"
+        return result.submitted_answer or "-"
+
+    def _render_workbook_summary(self, validation: WorkbookValidationResult):
+        """Render the workbook grade and summary banner."""
         with ui.card().classes("w-full bg-emerald-50 shadow-none ring-1 ring-emerald-200"):
             with ui.column().classes("w-full gap-2 p-5"):
                 ui.label(f"Bewertung: Note {validation.grade}").classes(
                     "text-lg font-semibold text-emerald-800"
                 )
                 ui.label(validation.summary).classes("whitespace-pre-wrap text-sm text-emerald-700")
-        self._render_workbook_user_solution(task, validation)
-        self._render_workbook_corrected_solution(task, validation)
 
     def _render_workbook_user_solution(
         self,
@@ -814,6 +1093,62 @@ class ChatUI:
             with ui.column().classes("w-full gap-3 p-5"):
                 ui.label("Korrigierte Version").classes("text-lg font-semibold text-slate-900")
                 self._render_workbook_solution_text(task, validation, corrected=True)
+
+    def _render_reading_user_answers(
+        self,
+        task: WorkbookTask,
+        validation: WorkbookValidationResult,
+    ):
+        """Render the submitted reading answers with inline marking."""
+        self._render_reading_result_card("Deine Antworten", task, validation, corrected=False)
+
+    def _render_reading_corrected_answers(
+        self,
+        task: WorkbookTask,
+        validation: WorkbookValidationResult,
+    ):
+        """Render the corrected reading answers."""
+        self._render_reading_result_card("Musterloesungen", task, validation, corrected=True)
+
+    def _render_reading_result_card(
+        self,
+        title: str,
+        task: WorkbookTask,
+        validation: WorkbookValidationResult,
+        corrected: bool,
+    ):
+        """Render one reading-comprehension result card."""
+        with ui.card().classes("w-full bg-white shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-3 p-5"):
+                ui.label(title).classes("text-lg font-semibold text-slate-900")
+                for question in task.questions:
+                    self._render_reading_result_item(question.question_id, question.prompt, validation, corrected)
+
+    def _render_reading_result_item(
+        self,
+        question_id: str,
+        prompt: str,
+        validation: WorkbookValidationResult,
+        corrected: bool,
+    ):
+        """Render one validated reading-comprehension answer."""
+        result = validation.question_result_for(question_id)
+        with ui.card().classes("w-full bg-slate-50 shadow-none ring-1 ring-slate-200"):
+            with ui.column().classes("w-full gap-2 p-4"):
+                ui.label(prompt).classes("whitespace-pre-wrap text-sm font-semibold text-slate-900")
+                self._render_reading_result_answer(result, corrected)
+
+    def _render_reading_result_answer(self, result, corrected: bool):
+        """Render one reading result answer badge and explanation."""
+        if result is None:
+            self._render_missing_result_badge()
+            return
+        label = result.correction if corrected else (result.submitted_answer or "-")
+        with ui.element("span").classes(self._result_badge_classes(result, corrected)):
+            ui.label(label).classes("text-inherit whitespace-pre-wrap")
+        if corrected or not result.explanation:
+            return
+        ui.label(result.explanation).classes("whitespace-pre-wrap text-xs text-slate-500")
 
     def _render_workbook_solution_text(
         self,
@@ -842,10 +1177,7 @@ class ChatUI:
         """Render one workbook blank inside a validated solution view."""
         result = validation.result_for(blank_id)
         if result is None:
-            with ui.element("span").classes(
-                "inline-flex items-center rounded-md bg-slate-400 px-3 py-1 text-sm font-semibold text-white"
-            ):
-                ui.label("-").classes("text-inherit")
+            self._render_missing_result_badge()
             return
         label = result.correction if corrected else (result.submitted_answer or "-")
         with ui.element("span").classes(self._result_badge_classes(result, corrected)):
@@ -853,6 +1185,13 @@ class ChatUI:
         if corrected or not result.explanation:
             return
         ui.label(result.explanation).classes("text-xs text-slate-500")
+
+    def _render_missing_result_badge(self):
+        """Render a placeholder when no validation result is available."""
+        with ui.element("span").classes(
+            "inline-flex items-center rounded-md bg-slate-400 px-3 py-1 text-sm font-semibold text-white"
+        ):
+            ui.label("-").classes("text-inherit")
 
     def _result_badge_classes(self, result, corrected: bool) -> str:
         """Return the visual style for one validated blank."""

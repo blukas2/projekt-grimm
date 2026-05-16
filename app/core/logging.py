@@ -42,22 +42,22 @@ class RecentEntriesFileHandler(logging.Handler):
         content = self._serialize_entries(entries)
         self._file_path.write_text(content, encoding="utf-8")
 
-    def _read_retained_entries(self) -> list[dict[str, str]]:
+    def _read_retained_entries(self) -> list[dict]:
         cutoff = datetime.now(timezone.utc) - RETENTION_WINDOW
-        entries: list[dict[str, str]] = []
+        entries: list[dict] = []
         for line in self._file_path.read_text(encoding="utf-8").splitlines():
             entry = self._parse_entry(line)
             if entry and self._is_recent(entry, cutoff):
                 entries.append(entry)
         return entries
 
-    def _parse_entry(self, line: str) -> dict[str, str] | None:
+    def _parse_entry(self, line: str) -> dict | None:
         try:
             return json.loads(line)
         except json.JSONDecodeError:
             return None
 
-    def _is_recent(self, entry: dict[str, str], cutoff: datetime) -> bool:
+    def _is_recent(self, entry: dict, cutoff: datetime) -> bool:
         timestamp = entry.get("timestamp")
         if not timestamp:
             return False
@@ -66,7 +66,7 @@ class RecentEntriesFileHandler(logging.Handler):
         except ValueError:
             return False
 
-    def _serialize_entries(self, entries: list[dict[str, str]]) -> str:
+    def _serialize_entries(self, entries: list[dict]) -> str:
         lines = [json.dumps(entry, ensure_ascii=True) for entry in entries]
         return "\n".join(lines) + ("\n" if lines else "")
 

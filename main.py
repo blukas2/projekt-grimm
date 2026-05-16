@@ -33,11 +33,11 @@ def read_api_key(logger):
 
 def build_chat_ui(api_key: str) -> ChatUI:
     """Create the teacher chat UI and the independent translator panel."""
-    teacher_agent = GermanTeacherAgent(api_key)
+    vocabulary_repository = VocabularyRepository(read_user_data_root_folder())
+    teacher_agent = GermanTeacherAgent(api_key, vocabulary_repository)
     live_teacher = LiveGermanTeacherAgent(api_key)
     live_teacher.register_routes()
     translator = GemmaTranslator(api_key)
-    vocabulary_repository = VocabularyRepository(read_user_data_root_folder())
     return ChatUI(teacher_agent, translator, vocabulary_repository)
 
 

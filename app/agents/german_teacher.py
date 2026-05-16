@@ -2,15 +2,18 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from google import genai
 from google.genai import types
 
+from app.core.vocabulary import VocabularyRepository
 from app.core.workbook import (
     WorkbookAnswer,
     WorkbookAssistanceMode,
     WorkbookEvent,
     WorkbookTask,
+    WorkbookTaskFamily,
 )
 
 from .workbook_tools import WorkbookToolService
@@ -47,6 +50,10 @@ Behaviour:
 
 Workbook tools:
 - If the student asks for a workbook exercise or task, use the workbook creation tool.
+- If the student asks for reading comprehension or Leseverstehen, set task_family to reading_comprehension.
+- If the student asks for a writing exercise, Aufsatz, Textproduktion, or a text based on instructions, set task_family to guided_writing.
+- If the student asks for a grammar or gap-fill exercise, set task_family to fill_in_blank.
+- If the student asks for vocabulary practice, Wortschatztraining, articles, plural forms, verb forms, or translation drills for known words, set task_family to vocabulary_practice.
 - Do not print the full workbook exercise into chat when the tool is available.
 - After creating a workbook task, tell the student briefly that the task is ready in the Arbeitsbuch.
 - If a workbook submission needs grading, use the workbook validation tool.
@@ -68,9 +75,9 @@ class TeacherResponse:
 class GermanTeacherAgent:
     """Wraps a google-genai chat session acting as a German teacher."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, vocabulary_repository: VocabularyRepository):
         self._client = genai.Client(api_key=api_key)
-        self._workbook_tools = WorkbookToolService(api_key)
+        self._workbook_tools = WorkbookToolService(api_key, vocabulary_repository)
         self._config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             tools=[
@@ -95,12 +102,14 @@ class GermanTeacherAgent:
         self,
         request_text: str,
         assistance_mode: str = WorkbookAssistanceMode.AUTO.value,
+        task_family: str = WorkbookTaskFamily.FILL_IN_BLANK.value,
     ) -> TeacherResponse:
         """Create a workbook task from the dedicated Arbeitsbuch controls."""
         await asyncio.to_thread(
             self._workbook_tools.create_workbook_task,
             request_text,
             assistance_mode,
+            task_family,
         )
         return TeacherResponse(text="", workbook_events=self._consume_workbook_events())
 
